@@ -107,7 +107,7 @@ ai-workbuddy-os/
 ├── card_gate.py         闸门（仅标准库）
 ├── 开卡.py              开卡器（仅标准库，全相对路径）
 ├── MEMORY.example.md    记忆文件模板（请抄成你自己的）
-├── LICENSE              MIT（改掉第 3 行的名字即可）
+├── LICENSE              MIT（版权人 sargaras）
 └── 示例/
     ├── 项目卡-示例.md   填满的卡，闸门 5/5 通过
     └── _台账.json       配套台账
@@ -221,4 +221,5 @@ MIT —— 随便用，随便改，随便商用，不用署名（保留 LICENSE 
 
 MIT — use it, fork it, sell it. Just keep the copyright notice.
 
-可替换：`LICENSE` 第 3 行的 `Copyright (c) 2026 <YOUR NAME>` 改成你的名字或 GitHub 用户名，其余正文一个字都不用动。
+版权人：sargaras（`LICENSE` 第 3 行为 `Copyright (c) 2026 sargaras`，无需再改）。
+Copyright holder: sargaras — nothing to edit.
