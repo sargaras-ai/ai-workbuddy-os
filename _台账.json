@@ -1,0 +1,49 @@
+{
+  "card": "P-07-plant",
+  "updated": "2026-01-01",
+  "decisions": [
+    {
+      "date": "2025-12-20",
+      "text": "数据存本地 JSON，不选 SQLite：单文件几百条记录，JSON 可直接手改、便于用户备份"
+    },
+    {
+      "date": "2025-12-22",
+      "text": "选 PySide6 6.5.2，不选 Tkinter：需要托盘与更细的表格控件"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "text": "实现 CSV 导出：把浇水记录导成 UTF-8 BOM 的 CSV，Excel 直接双击不乱码",
+      "owner": "项目所有者",
+      "due": "2026-01-15",
+      "accept": "导出文件在 Excel 中打开中文列名正常；行数与原记录条数一致",
+      "status": "open"
+    }
+  ],
+  "unknowns": [
+    {
+      "id": "U1",
+      "field": "是否支持多语言",
+      "why": "目前只有一个人用，翻译成本换不来收益",
+      "who": "项目所有者",
+      "due": "2026-02-01"
+    }
+  ],
+  "pits": [
+    {
+      "date": "2025-12-28",
+      "symptom": "中文界面下日期选择框宽度塌陷成一条线",
+      "cause": "主题默认 sizeHint 未考虑中文字宽",
+      "fix": "固定 minWidth 96",
+      "scope": "project"
+    },
+    {
+      "date": "2025-12-30",
+      "symptom": "打包后读不到 data 目录",
+      "cause": "运行时路径指向临时解包目录",
+      "fix": "spec 里 datas 显式声明，代码统一走 resource_path()",
+      "scope": "project"
+    }
+  ]
+}
