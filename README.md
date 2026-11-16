@@ -22,7 +22,7 @@
 
 这套东西的答案很土：**把项目状态从对话里搬进文件，把"完成"的定义交给脚本。**
 
-### 五件套
+### 六件套
 
 ```
 总则.md      怎么记（必记四类 / 不记四类 / 判定线）
@@ -30,6 +30,7 @@
 卡模板.md    记在哪（15 段固定结构，状态行派生不手填）
 card_gate.py 形式卡口（G1–G7 七项机器检查，退出码说话；只管卡的结构，不管代码算得对不对）
 开卡.py      怎么开工（一条命令建卡、写台账、追加索引、跑闸门）
+自检.py      防腐剂（规则自己有没有改歪、副本有没有被 cp 冲掉，26 项）
 ```
 
 ### 三分钟上手
@@ -54,7 +55,19 @@ python 开卡.py P-03-myproject
 # 台账：_台账.json（4 数组空）｜索引：末行已追加
 ```
 
-**③ 让 AI 按这套规则干活**
+**③ 验一遍规则自己有没有改歪**
+
+改了 `总则.md` / `暗语表.md` 之后跑这个——它查文档之间是否自洽、副本是否还是"适配版"：
+
+```bash
+python 自检.py
+# PASS 规则自检：26 项全过
+```
+
+典型能拦住的事：改了暗语表却忘了同步总则里那份排序（两份规则各说一套）、新增口令没登记生命周期、
+副本被正本原样 `cp` 覆盖（适配丢失，路径泄漏会跟着回来）。
+
+**④ 让 AI 按这套规则干活**
 
 把 `MEMORY.example.md` 的内容抄进你 AI 的长期记忆文件（WorkBuddy / Claude / Cursor 都行），
 再补上你自己的偏好（语言、盘符、禁止事项）。**本仓库不提供任何人的私人记忆**，那部分必须你自己写。
@@ -110,6 +123,7 @@ ai-workbuddy-os/
 ├── 通用坑.md            跨项目坑池（同一坑在 ≥2 个项目复现才收进来）
 ├── card_gate.py         闸门（仅标准库）
 ├── 开卡.py              开卡器（仅标准库，全相对路径）
+├── 自检.py              规则自检：文档自洽 + 副本未被 cp 覆盖（仅标准库）
 ├── MEMORY.example.md    记忆文件模板（请抄成你自己的）
 ├── LICENSE              MIT（版权人 sargaras）
 └── 示例/
@@ -121,7 +135,7 @@ ai-workbuddy-os/
 
 ### 可移植性
 
-仓库内两个脚本都用 `os.path.dirname(os.path.abspath(__file__))` 定位自身，
+仓库内三个脚本都用 `os.path.dirname(os.path.abspath(__file__))` 定位自身，
 **不写死任何盘符或绝对路径**。clone 到 `D:\`、`~/code/`、`/opt/` 都能直接跑；
 项目目录默认建在仓库的**上级目录**，可用 `--root` 覆盖：
 
@@ -158,14 +172,15 @@ decide whether the work is actually done.
 | It says "done", your first test says otherwise | The model graded its own homework |
 | Project A's port number leaks into project B | No isolation, only good intentions |
 
-### The five pieces
+### The six pieces
 
 ```
 总则.md      How to remember   — 4 must-record classes, 4 never-record classes, one decision line
 暗语表.md    How to talk       — 22 commands, each with trigger, lifetime, and receipt format
 卡模板.md    Where to write    — 15 fixed sections; the status line is derived, never hand-typed
-card_gate.py Who may say done  — 5 machine checks, verdict by exit code
+card_gate.py Who may say done  — 7 machine checks, verdict by exit code
 开卡.py      How to start      — one command: card, ledger, index, gate
+自检.py      Anti-rot          — 26 checks: do the docs still agree with each other
 ```
 
 ### Sixty-second start
@@ -174,6 +189,7 @@ card_gate.py Who may say done  — 5 machine checks, verdict by exit code
 git clone <this-repo> ai-workbuddy-os && cd ai-workbuddy-os
 python card_gate.py 示例/项目卡-示例.md     # 结论：通过（7/7） — see a passing card
 python 开卡.py P-03-myproject              # create your own
+python 自检.py                             # PASS 规则自检：26 项全过 — rules still self-consistent
 ```
 
 Then copy `MEMORY.example.md` into your AI assistant's long-term memory file and fill in
