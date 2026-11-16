@@ -11,11 +11,13 @@
     G3  参数表无 按需/灵活/通常/一般/适当
     G4  待定项四列齐全（字段/为什么没定/谁定/决策截止日）
     G5  待定数 = 台账 unknowns 条数；状态行 待办/待定 与台账一致
+    G6  第 8 段含二级测试命令，或第 10 段声明二级闸门豁免（只看有没有写）
 
 退出码: 0 全通过 / 1 有不通过项 / 2 无法检测（文件缺失等）
 
 局限（明写，别当它能判语义）:
     G2 只能判「非空、非占位、非纯空话」，判不出失败表现是否真的可观察。
+    G6 只判「有没有写」，不执行、不判命令能否跑通——真跑不跑由封版流程负责。
 """
 import json
 import os
@@ -195,6 +197,29 @@ def main():
                     results.append(("G5", True, "待办 %d / 待定 %d，与台账一致（只数台账，不数卡内占位）" % (n_task, n_unk)))
         except json.JSONDecodeError as e:
             results.append(("G5", False, "台账 JSON 解析失败：%s" % e))
+
+    # G6：二级测试命令是否写了（形式检查，不执行）
+    sec8 = sec.get(8, (0, []))[1]
+    sec10 = sec.get(10, (0, []))[1]
+    TEST_HINT = re.compile(r"(--selftest|--test|tests[\\/]+run_tests\.py)", re.I)
+    WAIVER_RE = re.compile(r"^[-*]?\s*二级闸门(?:豁免)?[：:]\s*(\S.*)$")
+    hit8, waiver = None, None
+    for ln in sec8:
+        s = ln.strip()
+        if TEST_HINT.search(s) and "待定" not in s and "占位" not in s:
+            hit8 = s.lstrip("-* ").strip()
+            break
+    for ln in sec10:
+        m = WAIVER_RE.match(ln.strip())
+        if m:
+            waiver = m.group(1).strip()
+            break
+    if hit8:
+        results.append(("G6", True, "命令组含二级测试：%s" % hit8[:48]))
+    elif waiver and len(waiver) >= 6 and not re.fullmatch(r"(不适用|无|暂无)[。.]?", waiver):
+        results.append(("G6", True, "已声明二级闸门不适用：%s" % waiver[:48]))
+    else:
+        results.append(("G6", False, "第 8 段缺二级测试命令（--test / --selftest / tests/run_tests.py），且第 10 段无「二级闸门豁免：<理由>」"))
 
     # 输出
     card_id = status.group(1) if status else os.path.basename(card)

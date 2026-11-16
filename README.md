@@ -28,7 +28,7 @@
 总则.md      怎么记（必记四类 / 不记四类 / 判定线）
 暗语表.md    怎么说（22 个口令，每个都有触发条件、生命周期、回执格式）
 卡模板.md    记在哪（15 段固定结构，状态行派生不手填）
-card_gate.py 谁能说完成（G1–G5 五项机器检查，退出码说话）
+card_gate.py 形式卡口（G1–G6 六项机器检查，退出码说话；只管卡的结构，不管代码算得对不对）
 开卡.py      怎么开工（一条命令建卡、写台账、追加索引、跑闸门）
 ```
 
@@ -43,7 +43,7 @@ cd ai-workbuddy-os
 
 ```bash
 python card_gate.py 示例/项目卡-示例.md
-# 结论：通过（5/5）
+# 结论：通过（6/6）
 ```
 
 **② 开一张自己的卡**
@@ -109,7 +109,7 @@ ai-workbuddy-os/
 ├── MEMORY.example.md    记忆文件模板（请抄成你自己的）
 ├── LICENSE              MIT（版权人 sargaras）
 └── 示例/
-    ├── 项目卡-示例.md   填满的卡，闸门 5/5 通过
+    ├── 项目卡-示例.md   填满的卡，闸门 6/6 通过
     └── _台账.json       配套台账
 ```
 
@@ -166,7 +166,7 @@ card_gate.py Who may say done  — 5 machine checks, verdict by exit code
 
 ```bash
 git clone <this-repo> ai-workbuddy-os && cd ai-workbuddy-os
-python card_gate.py 示例/项目卡-示例.md     # 结论：通过（5/5） — see a passing card
+python card_gate.py 示例/项目卡-示例.md     # 结论：通过（6/6） — see a passing card
 python 开卡.py P-03-myproject              # create your own
 ```
 

@@ -2,21 +2,15 @@
 # -*- coding: utf-8 -*-
 """开卡.py —— 《项目》 <短名> 的机械化开卡器（仅标准库，py3.6+ 可跑）
 
-用法（在仓库目录内，或写全路径都行）：
-    python 开卡.py P-03-invoice
-    python 开卡.py P-03-invoice --dry-run
-    python 开卡.py P-03-invoice --root /path/to/workspace/P-03-invoice
-    python 开卡.py --self-test          # 自检：全在临时目录，不碰真索引
-
-路径规则（可移植性）：
-    所有内部路径都由 os.path.dirname(os.path.abspath(__file__)) 推导，
-    clone 到任何盘符、任何目录都能直接跑，不需要改代码。
-    新建项目目录默认落在「本仓库的上级目录」（即工作区）下，可用 --root 覆盖。
+用法：
+    python H:\\项目约束包\\开卡.py P-03-invoice
+    python H:\\项目约束包\\开卡.py P-03-invoice --dry-run
+    python H:\\项目约束包\\开卡.py --self-test          # 自检：全在临时目录，不碰真索引
 
 做的事（顺序固定，不可调换）：
     1 校验短名格式        P-XX-short（两位序号 + 小写英文/数字/连字符）
-    2 查重                索引已有该卡号 → 中止；目标目录已存在 → 中止
-    3 建目录              <工作区>/<短名>/
+    2 查重                索引已有该卡号 → 中止；H:\\<短名>\\ 已存在 → 中止
+    3 建目录              H:\\<短名>\\
     4 复制空白卡          P-00-空白卡.md → 项目卡.md，替换卡号/状态行/根路径/自检命令
     5 写台账              _台账.json，card + updated + 四个空数组
     6 追加索引            索引.md 末行追加（项目名写「待定」，开卡时还没定位）
@@ -25,7 +19,7 @@
 失败处理：4-7 任一步失败 → 删掉本次刚建的目录、删掉本次刚追加的索引行，回执「已回滚」。
           只删自己建的，不动任何既有文件。
 
-开卡闸门预期：G1/G3/G5 应通过；G2/G4 必红（验收与待定项还是占位）。
+开卡闸门预期：G1/G3/G5 应通过；G2/G4/G6 必红（验收、待定项、二级测试命令还是占位）。
              这是「空卡态」的正常结果，不是错误，脚本会单独标注。
 """
 
@@ -38,15 +32,32 @@ import sys
 import tempfile
 from datetime import datetime
 
-# 以脚本自身位置为根，不写死任何盘符
-BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = r"H:\项目约束包"
 BLANK = os.path.join(BASE, "P-00-空白卡.md")
 INDEX = os.path.join(BASE, "索引.md")
 GATE = os.path.join(BASE, "card_gate.py")
-# 工作区默认＝仓库的上级目录（项目与约束包平级）
-WORKSPACE = os.path.dirname(BASE)
 
 NAME_RE = re.compile(r"^P-(\d{2})-([a-z][a-z0-9-]{1,20})$")
+
+
+class GateStructureError(Exception):
+    """开卡器产出的卡结构不合格（不是占位预期）——必须中止并回滚。"""
+
+
+def gate_structure_bad(out):
+    """结构项 G1/G3/G5 未通过的清单与明细。空清单＝全绿。
+
+    只认闸门回执行「G1 通过｜…」；缺行按「缺失」算不通过
+    （闸门自己崩掉时不能当结构没问题）。
+    """
+    seen = {}
+    for ln in out.splitlines():
+        m = re.match(r"^(G\d) (通过|不通过)｜", ln)
+        if m:
+            seen[m.group(1)] = m.group(2)
+    bad = [g for g in ("G1", "G3", "G5") if seen.get(g) != "通过"]
+    detail = "；".join("%s=%s" % (g, seen.get(g, "缺失")) for g in bad)
+    return bad, detail
 
 
 def fail(msg, code=2):
@@ -164,14 +175,30 @@ def open_card(card, root, base_dir, index_path, dry_run=False):
         print("台账：_台账.json（4 数组空）｜索引：末行已追加｜闸门退出码：%s" % code)
         print("")
         print(out.rstrip())
+
+        # 结构项必须全绿：G1/G3/G5 任一不是「通过」= 卡结构坏了，不属于占位预期，绝不能报成"预期"
+        bad, detail = gate_structure_bad(out)
+        if bad:
+            raise GateStructureError(
+                "闸门结构项 %s 未通过（预期只有 G2/G4/G6 可为红）：%s" % ("/".join(bad), detail))
+
         if code == 0:
-            print("闸门 5/5 —— 卡已可直接填内容。")
+            print("闸门 6/6 —— 卡已可直接填内容。")
         else:
-            print("闸门非满分属预期：G2/G4 红是「空卡占位态」的正常结果（验收与待定项还没填）。")
-            print("判据：G1/G3/G5 必须通过；G2/G4 转绿要等你给定位/目标/验收。")
+            print("闸门非满分属预期：G2/G4/G6 红是「空卡占位态」的正常结果（验收、待定项、二级测试命令还没填）。")
+            print("判据：G1/G3/G5 必须通过（已机器校验）；G2/G4/G6 转绿要等你给定位/目标/验收/二级测试命令。")
         print("")
         print("请告诉我项目定位/目标/非目标。")
         return 0
+    except GateStructureError as e:
+        # 结构不合格：与写盘失败同等处理，回滚干净，退出码 1
+        if index_written:
+            rollback_index(index_path, idx_text)
+            print("回滚：索引末行已撤销")
+        if created_dir and os.path.isdir(root):
+            shutil.rmtree(root, ignore_errors=True)
+            print("回滚：目录 %s 已删除" % root)
+        fail("开卡中止｜卡结构不合格 —— %s。已回滚，磁盘未留半成品" % e, 1)
     except Exception as e:
         # 回滚：只撤本次做的
         if index_written:
@@ -184,7 +211,7 @@ def open_card(card, root, base_dir, index_path, dry_run=False):
 
 
 def self_test():
-    """全程在临时目录跑，不碰真索引。"""
+    """全程在临时目录跑，不碰 H:\\ 根与真索引。"""
     tmp = tempfile.mkdtemp(prefix="kaika_selftest_")
     base = os.path.join(tmp, "包")
     os.makedirs(base)
@@ -192,7 +219,7 @@ def self_test():
     idx = os.path.join(base, "索引.md")
     with open(idx, "w", encoding="utf-8", newline="\n") as f:
         f.write("# 索引\n\n| 卡号 | 项目名 | 根路径 | 基线 | 状态 | 最后变更日 |\n"
-                "|---|---|---|---|---|---|\n| P-01-demo | 演示项目 | `<workspace>/P-01-demo/` | v1.0 | 在建 | 2026-01-01 |\n")
+                "|---|---|---|---|---|---|\n| P-01-hede | 禾灯 | `H:\\P01-hede\\` | v1.0 | 在建 | 2026-11-15 |\n")
 
     ok = True
 
@@ -272,7 +299,7 @@ def main(argv):
         return 2
     card = args[0].strip()
     if root is None:
-        root = os.path.join(WORKSPACE, card)
+        root = os.path.join("H:\\", card + "\\")
     return open_card(card, root, BASE, index_path, dry_run=dry)
 
 
