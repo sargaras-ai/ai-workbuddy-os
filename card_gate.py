@@ -13,6 +13,8 @@
     G5  待定数 = 台账 unknowns 条数；状态行 待办/待定 与台账一致
     G6  第 8 段含二级测试命令，且其目标（run_tests.py / 被测 .py / tests 目录）
         必须真实存在；或第 10 段声明豁免/历史卡。写了不存在的路径＝伪造测试，判红。
+    G7  验收↔测试映射：第 9 段每行第 5 列须写测试标识，一条对一个、不许重复，
+        且该标识要能在 G6 定位到的测试文件里逐字找到；豁免/历史卡可不填。
 
 退出码: 0 全通过 / 1 有不通过项 / 2 无法检测（文件缺失等）
 
@@ -20,6 +22,7 @@
     G2 只能判「非空、非占位、非纯空话」，判不出失败表现是否真的可观察。
     G6 只校验测试目标文件是否存在，不执行命令、不校验解释器——能不能跑通由封版流程负责。
     G6 解析的是命令里的字面路径，相对卡所在目录；用变量拼出来的路径它看不懂，会判「定位不到」。
+    G7 只判「名字对得上」，判不出那条测试是否真的在验这条验收——断言写得对不对仍要人看。
 """
 import json
 import os
@@ -62,6 +65,39 @@ def target_path(base, rel):
     """把命令里的路径按「相对卡所在目录」解析成绝对路径。"""
     p = rel.replace("\\", os.sep).replace("/", os.sep)
     return p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
+
+
+# G7 用：验收第 5 列里这些值等于没写
+ID_JUNK = {"", "-", "—", "同上", "见测试", "见上", "待定", "无", "tbd", "n/a"}
+
+
+def pick_test_id(cell):
+    """取验收第 5 列里的测试标识：去掉反引号、开头的 → / -> 等符号、以及括注。"""
+    s = (cell or "").replace("`", "").strip()
+    s = re.sub(r"^[^\w]+", "", s)
+    if not s:
+        return ""
+    return re.split(r"[\s（(，,、;；]+", s)[0].strip()
+
+
+def read_test_text(path):
+    """读测试目标的全部源码文本；给目录则递归取 .py。找不到返回空串。"""
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except OSError:
+            return ""
+    buf = []
+    for root, _, names in os.walk(path):
+        for n in names:
+            if n.endswith(".py"):
+                try:
+                    with open(os.path.join(root, n), encoding="utf-8", errors="replace") as f:
+                        buf.append(f.read())
+                except OSError:
+                    pass
+    return "\n".join(buf)
 
 
 def split_row(line):
@@ -247,6 +283,7 @@ def main():
             waiver = m.group(1).strip()
             break
     waiver_ok = bool(waiver) and len(waiver) >= 6 and not re.fullmatch(r"(不适用|无|暂无)[。.]?", waiver)
+    tgt, tgt_path = None, None      # 给 G7 复用：G6 定位到的测试目标
 
     if hit8:
         tgt = find_test_target(hit8)
@@ -257,6 +294,7 @@ def main():
         else:
             p = target_path(base, tgt)
             if os.path.exists(p):
+                tgt_path = p
                 results.append(("G6", True, "命令组含二级测试：%s；目标存在：%s" % (hit8[:40], tgt)))
             else:
                 results.append(("G6", False,
@@ -266,6 +304,40 @@ def main():
         results.append(("G6", True, "已声明二级闸门不适用：%s" % waiver[:48]))
     else:
         results.append(("G6", False, "第 8 段缺二级测试命令（--test / --selftest / tests/run_tests.py），且第 10 段无「二级闸门豁免：<理由>」"))
+
+    # G7：验收 ↔ 测试映射（第 9 段第 5 列；一对一；标识须在测试目标里逐字存在）
+    acc9 = table_rows(sec.get(9, (0, []))[1])
+    bad7, pairs, seen = [], [], {}
+    for i, cells in enumerate(acc9, 1):
+        tid = pick_test_id(cells[4]) if len(cells) >= 5 else ""
+        if not tid or tid.lower() in ID_JUNK:
+            if waiver_ok:
+                continue                      # 豁免/历史卡不填映射，合法
+            bad7.append("第%d条 %s" % (i, "缺第 5 列「测试标识」" if len(cells) < 5
+                                       else "测试标识为空或指代不明「%s」" % (cells[4].strip() or "空")))
+            continue
+        if tid in seen:
+            bad7.append("第%d条 与第%d条 共用同一个测试「%s」——一条验收一个测试，不许合并" % (i, seen[tid], tid))
+            continue
+        seen[tid] = i
+        pairs.append((i, tid))
+
+    if not acc9:
+        bad7.append("第 9 段没有验收表，无从映射")
+    elif pairs and not tgt_path:
+        bad7.append("填了测试标识，但第 8 段没有可解析且真实存在的测试目标，无法校验（先修 G6）")
+    elif pairs:
+        text = read_test_text(tgt_path)
+        miss = [(i, t) for i, t in pairs if t not in text]
+        if miss:
+            bad7.append("测试里找不到这些标识：" + "、".join("第%d条「%s」" % (i, t) for i, t in miss))
+
+    if bad7:
+        results.append(("G7", False, "；".join(bad7)))
+    elif pairs:
+        results.append(("G7", True, "映射 %d 条一对一，标识在 %s 里均能找到" % (len(pairs), tgt)))
+    else:
+        results.append(("G7", True, "已豁免/历史卡，不填映射（验收 %d 条）" % len(acc9)))
 
     # 输出
     card_id = status.group(1) if status else os.path.basename(card)
