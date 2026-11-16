@@ -26,11 +26,11 @@
 
 ```
 总则.md      怎么记（必记四类 / 不记四类 / 判定线）
-暗语表.md    怎么说（22 个口令，每个都有触发条件、生命周期、回执格式）
+暗语表.md    怎么说（23 条口令 / 32 个词，每个都有触发条件、生命周期、回执格式）
 卡模板.md    记在哪（15 段固定结构，状态行派生不手填）
 card_gate.py 形式卡口（G1–G7 七项机器检查，退出码说话；只管卡的结构，不管代码算得对不对）
 开卡.py      怎么开工（一条命令建卡、写台账、追加索引、跑闸门）
-自检.py      防腐剂（规则自己有没有改歪、副本有没有被 cp 冲掉，26 项）
+自检.py      防腐剂（规则自己有没有改歪、副本有没有被 cp 冲掉；包内 26 项，clone 后 13 项）
 ```
 
 ### 三分钟上手
@@ -61,11 +61,25 @@ python 开卡.py P-03-myproject
 
 ```bash
 python 自检.py
-# PASS 规则自检：26 项全过
+# PASS 规则自检：13 项全过
 ```
+
+> 项数为什么是 13 而不是 26：包里那份（作者本机）会额外查「发布副本是否被正本 `cp` 覆盖」等 13 项，
+> 需要正本与 `github_release/` 并存才成立。你 clone 下来只有一份文档，跑的就是这 13 项。
 
 典型能拦住的事：改了暗语表却忘了同步总则里那份排序（两份规则各说一套）、新增口令没登记生命周期、
 副本被正本原样 `cp` 覆盖（适配丢失，路径泄漏会跟着回来）。
+
+**让它变成硬门**（推荐）：别指望自己记得跑。提交前挂一道，红了就不许提交：
+
+```bash
+# .git/hooks/pre-commit（chmod +x）
+#!/bin/sh
+python 自检.py || exit 1
+```
+
+CI 同理：加一个 `run: python 自检.py` 的步骤即可。**能失败的闸门才算闸门**——
+跑一次全绿的脚本，和从不跑它，差别为零。
 
 **④ 让 AI 按这套规则干活**
 
@@ -116,14 +130,14 @@ python 自检.py
 ```
 ai-workbuddy-os/
 ├── 总则.md              规则总纲（记忆规则 / 闸门要点 / 存储分层）
-├── 暗语表.md            22 个口令 + 优先级 + 生命周期
+├── 暗语表.md            23 条口令（32 个词）+ 优先级 + 生命周期
 ├── 卡模板.md            15 段结构 + 状态行派生 + 待办/待定分栏
 ├── P-00-空白卡.md       空卡壳子（开卡时复制它）
 ├── 索引.md              全局登记表（追加区）
 ├── 通用坑.md            跨项目坑池（同一坑在 ≥2 个项目复现才收进来）
 ├── card_gate.py         闸门（仅标准库）
 ├── 开卡.py              开卡器（仅标准库，全相对路径）
-├── 自检.py              规则自检：文档自洽 + 副本未被 cp 覆盖（仅标准库）
+├── 自检.py              规则自检：文档自洽 + 副本未被 cp 覆盖（包内 26 项 / clone 后 13 项）
 ├── MEMORY.example.md    记忆文件模板（请抄成你自己的）
 ├── LICENSE              MIT（版权人 sargaras）
 └── 示例/
@@ -159,7 +173,7 @@ python 开卡.py P-03-demo --root /path/to/anywhere/P-03-demo
 
 **An engineering discipline layer for long-running AI projects.**
 
-Not a prompt pack. Not a framework. Five files and two scripts that move project state
+Not a prompt pack. Not a framework. Six files and three scripts that move project state
 *out of the chat window* and *into files with a schema*, then let a script — not the model —
 decide whether the work is actually done.
 
@@ -176,11 +190,11 @@ decide whether the work is actually done.
 
 ```
 总则.md      How to remember   — 4 must-record classes, 4 never-record classes, one decision line
-暗语表.md    How to talk       — 22 commands, each with trigger, lifetime, and receipt format
+暗语表.md    How to talk       — 23 commands (32 keywords), each with trigger, lifetime, receipt format
 卡模板.md    Where to write    — 15 fixed sections; the status line is derived, never hand-typed
 card_gate.py Who may say done  — 7 machine checks, verdict by exit code
 开卡.py      How to start      — one command: card, ledger, index, gate
-自检.py      Anti-rot          — 26 checks: do the docs still agree with each other
+自检.py      Anti-rot          — 26 checks in the package, 13 after a plain clone
 ```
 
 ### Sixty-second start
@@ -189,8 +203,11 @@ card_gate.py Who may say done  — 7 machine checks, verdict by exit code
 git clone <this-repo> ai-workbuddy-os && cd ai-workbuddy-os
 python card_gate.py 示例/项目卡-示例.md     # 结论：通过（7/7） — see a passing card
 python 开卡.py P-03-myproject              # create your own
-python 自检.py                             # PASS 规则自检：26 项全过 — rules still self-consistent
+python 自检.py                             # PASS 规则自检：13 项全过 — rules still self-consistent
 ```
+
+Then make it a hard gate — a `.git/hooks/pre-commit` running `python 自检.py || exit 1`, or the
+same line as a CI step. A check that always passes is a ritual; a gate must be able to go red.
 
 Then copy `MEMORY.example.md` into your AI assistant's long-term memory file and fill in
 **your own** preferences — language, drives, hard restrictions. This repo deliberately ships
@@ -205,11 +222,15 @@ Then copy `MEMORY.example.md` into your AI assistant's long-term memory file and
 | G3 | No hedge words in the parameter table | `as needed` / `flexible` / `usually` are procrastination in syntax form |
 | G4 | Undecided items carry 4 columns incl. a **decision deadline** | An undated unknown is never decided |
 | G5 | Status-line counts == ledger counts | Stops "0 pending" on the card, 3 pending in the ledger |
+| G6 | The secondary test command must point at a file that **actually exists**, or declare an exemption | Naming a `tests/run_tests.py` that isn't there passes the gate = the test is decorative |
+| G7 | Acceptance ↔ test is **one-to-one**: 5th column holds a test id, no duplicates, must appear verbatim in the test file | Six acceptance rows sharing one `test_all` is a mapping in name only |
 
 Exit codes: `0` all pass / `1` some failed / `2` cannot evaluate.
 
 > Stated limitation: G2 verifies *non-empty, non-placeholder, non-vague*. It cannot verify
-> that a failure mode is genuinely observable. Machines guard form; humans guard meaning.
+> that a failure mode is genuinely observable. G6 checks existence, not results — whether the
+> code is *correct* is decided by the sealing run (exit code + `PASS n / FAIL 0`). G7 matches
+> names, not assertions. Machines guard form; humans guard meaning.
 
 ### The one red line
 
@@ -224,7 +245,7 @@ Rule: missing field → empty value + warning → UI marks "fill manually" → n
 
 ### Portability
 
-Both scripts locate themselves via `os.path.dirname(os.path.abspath(__file__))`.
+All three scripts locate themselves via `os.path.dirname(os.path.abspath(__file__))`.
 No hard-coded drives, no absolute paths. Clone anywhere; new projects are created as a
 **sibling** of the repo, overridable with `--root`. Requires Python 3.6+ and
 **standard library only** — zero third-party dependencies.
