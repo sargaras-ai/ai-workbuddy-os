@@ -7,11 +7,16 @@
     python H:\\项目约束包\\开卡.py P-03-invoice --dry-run
     python H:\\项目约束包\\开卡.py --self-test          # 自检：全在临时目录，不碰真索引
 
+包目录与新项目根目录默认按脚本所在位置推导（可用环境变量覆盖，换机/换盘不必改源码）：
+    WB_PACK  P-00-空白卡 / 索引 / card_gate 所在目录，默认 = 脚本所在目录
+    WB_ROOT  新项目目录建在这下面，默认 = 包目录的上一级
+
 做的事（顺序固定，不可调换）：
     1 校验短名格式        P-XX-short（两位序号 + 小写英文/数字/连字符）
-    2 查重                索引已有该卡号 → 中止；H:\\<短名>\\ 已存在 → 中止
-    3 建目录              H:\\<短名>\\
+    2 查重                索引已有该卡号 → 中止；<根目录>\\<短名>\\ 已存在 → 中止
+    3 建目录              <根目录>\\<短名>\\
     4 复制空白卡          P-00-空白卡.md → 项目卡.md，替换卡号/状态行/根路径/自检命令
+    4.5 锁                卡第 8 段若已写二级测试命令，其目标必须真实存在，否则中止并回滚
     5 写台账              _台账.json，card + updated + 四个空数组
     6 追加索引            索引.md 末行追加（项目名写「待定」，开卡时还没定位）
     7 跑闸门              card_gate.py，报结果
@@ -32,16 +37,50 @@ import sys
 import tempfile
 from datetime import datetime
 
-BASE = r"H:\项目约束包"
+BASE = os.environ.get("WB_PACK") or os.path.dirname(os.path.abspath(__file__))
+ROOT_BASE = os.environ.get("WB_ROOT") or os.path.dirname(BASE)
 BLANK = os.path.join(BASE, "P-00-空白卡.md")
 INDEX = os.path.join(BASE, "索引.md")
 GATE = os.path.join(BASE, "card_gate.py")
+
+sys.path.insert(0, BASE)
+import card_gate  # noqa: E402  复用 G6 的路径解析，避免「闸门一套、开卡器另一套」
 
 NAME_RE = re.compile(r"^P-(\d{2})-([a-z][a-z0-9-]{1,20})$")
 
 
 class GateStructureError(Exception):
     """开卡器产出的卡结构不合格（不是占位预期）——必须中止并回滚。"""
+
+
+def check_card_test_target(card_path):
+    """卡第 8 段若写了二级测试命令，校验其目标真实存在。有问题返回文本；没问题返回 None。
+
+    与 card_gate 的 G6 共用 find_test_target / target_path，
+    避免「闸门判红、开卡器判绿」两套标准。
+    """
+    try:
+        with open(card_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = re.search(r"^##\s*8\s.*?$(.*?)(?=^##\s*9\s)", text, re.M | re.S)
+    block = m.group(1) if m else ""
+    base = os.path.dirname(os.path.abspath(card_path))
+    for ln in block.splitlines():
+        s = ln.strip()
+        if not s or "待定" in s or "占位" in s:
+            continue
+        if not card_gate.TEST_HINT.search(s):
+            continue
+        tgt = card_gate.find_test_target(s)
+        if not tgt:
+            return ("第 8 段二级测试命令定位不到目标路径：%s"
+                    "（请写明 tests/run_tests.py、被测 .py 或 tests 目录）" % s[:60])
+        p = card_gate.target_path(base, tgt)
+        if not os.path.exists(p):
+            return "第 8 段声明的测试目标不存在：%s（解析为 %s）" % (tgt, p)
+    return None
 
 
 def gate_structure_bad(out):
@@ -163,6 +202,11 @@ def open_card(card, root, base_dir, index_path, dry_run=False):
         with open(card_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(render_card(blank, card, root))
 
+        # 锁：卡里若已写二级测试命令，其目标必须真实存在（写了不存在的路径＝伪造，直接中止+回滚）
+        bad_target = check_card_test_target(card_path)
+        if bad_target:
+            raise GateStructureError("测试目标校验未通过——" + bad_target)
+
         with open(os.path.join(root, "_台账.json"), "w", encoding="utf-8", newline="\n") as f:
             f.write(ledger_json(card, today))
 
@@ -272,6 +316,31 @@ def self_test():
     print("S8 写索引失败→目录已回滚  :", rolled, "|", out2.strip().splitlines()[:2])
     ok = ok and rolled
 
+    # 5 锁：模板里预填了不存在的测试路径 → 必须中止并回滚（防「伪造测试」）
+    fake_pack = os.path.join(tmp, "假包")
+    os.makedirs(fake_pack)
+    shutil.copy(GATE, os.path.join(fake_pack, "card_gate.py"))
+    with open(os.path.join(fake_pack, "索引.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("# 索引\n\n| 卡号 | 项目名 | 根路径 | 基线 | 状态 | 最后变更日 |\n"
+                "|---|---|---|---|---|---|\n")
+    src_lines = open(BLANK, encoding="utf-8").read().splitlines()
+    for i, ln in enumerate(src_lines):
+        if "业务测试" in ln and "待定" in ln:
+            src_lines[i] = "- 业务测试（二级）：python tests/run_tests.py"
+    with open(os.path.join(fake_pack, "P-00-空白卡.md"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(src_lines) + "\n")
+
+    root3 = os.path.join(tmp, "P-09-fake")
+    idx3 = os.path.join(fake_pack, "索引.md")
+    env3 = dict(os.environ, WB_PACK=fake_pack)
+    p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "P-09-fake",
+                          "--root", root3, "--index", idx3],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env3)
+    out3 = p.communicate()[0].decode("utf-8", "replace")
+    c8 = (p.returncode != 0 and "不存在" in out3 and not os.path.exists(root3))
+    print("S9 假测试路径→中止并回滚  :", c8, "|", (out3.strip().splitlines() or [""])[0][:60])
+    ok = ok and c8
+
     shutil.rmtree(tmp, ignore_errors=True)
     print("")
     print("SELFTEST " + ("PASS" if ok else "FAIL"))
@@ -299,7 +368,7 @@ def main(argv):
         return 2
     card = args[0].strip()
     if root is None:
-        root = os.path.join("H:\\", card + "\\")
+        root = os.path.join(ROOT_BASE, card + "\\")
     return open_card(card, root, BASE, index_path, dry_run=dry)
 
 

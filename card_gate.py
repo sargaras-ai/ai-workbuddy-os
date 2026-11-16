@@ -11,13 +11,15 @@
     G3  参数表无 按需/灵活/通常/一般/适当
     G4  待定项四列齐全（字段/为什么没定/谁定/决策截止日）
     G5  待定数 = 台账 unknowns 条数；状态行 待办/待定 与台账一致
-    G6  第 8 段含二级测试命令，或第 10 段声明二级闸门豁免（只看有没有写）
+    G6  第 8 段含二级测试命令，且其目标（run_tests.py / 被测 .py / tests 目录）
+        必须真实存在；或第 10 段声明豁免/历史卡。写了不存在的路径＝伪造测试，判红。
 
 退出码: 0 全通过 / 1 有不通过项 / 2 无法检测（文件缺失等）
 
 局限（明写，别当它能判语义）:
     G2 只能判「非空、非占位、非纯空话」，判不出失败表现是否真的可观察。
-    G6 只判「有没有写」，不执行、不判命令能否跑通——真跑不跑由封版流程负责。
+    G6 只校验测试目标文件是否存在，不执行命令、不校验解释器——能不能跑通由封版流程负责。
+    G6 解析的是命令里的字面路径，相对卡所在目录；用变量拼出来的路径它看不懂，会判「定位不到」。
 """
 import json
 import os
@@ -29,6 +31,37 @@ G3_WORDS = ("按需", "灵活", "通常", "一般", "适当")
 STATUS_RE = re.compile(r"^(P-\d{2}-[A-Za-z0-9_\-]+)｜基线 (.+?)｜待办 (\d+)｜待定 (\d+)\s*$")
 HEAD_RE = re.compile(r"^## (\d+)\s")
 EMPTY_TALK_RE = re.compile(r"^[\s（(]*(失败|异常|报错|有问题|不正常|表现异常|无|暂无)[\s。）)]*$")
+
+# 二级测试：命令特征 + 豁免声明
+TEST_HINT = re.compile(r"(--selftest\b|--test\b|tests[\\/]+run_tests\.py)", re.I)
+WAIVER_RE = re.compile(r"^[-*]?\s*二级闸门(?:豁免)?[：:]\s*(\S.*)$")
+
+
+def find_test_target(cmd):
+    """从二级测试命令里取出「必须真实存在」的目标路径；取不到返回 None。
+
+    只取测试目标（run_tests.py / 被测 .py / tests 目录），不取解释器：
+    解释器缺了会在封版真跑时由退出码暴露；测试文件不存在属于「伪造测试」，性质不同。
+    """
+    m = re.search(r"((?:[\w.\-]+[\\/])*tests[\\/]+run_tests\.py)", cmd, re.I)
+    if m:
+        return m.group(1)
+    if re.search(r"--selftest\b|--test\b", cmd, re.I):
+        m = re.search(r"([\w.\-]+(?:[\\/][\w.\-]+)*\.py)", cmd)
+        if m:
+            return m.group(1)
+        return None
+    if re.search(r"\bpytest\b", cmd, re.I):
+        m = re.search(r"\btests[\\/]?\b", cmd)
+        if m:
+            return "tests"
+    return None
+
+
+def target_path(base, rel):
+    """把命令里的路径按「相对卡所在目录」解析成绝对路径。"""
+    p = rel.replace("\\", os.sep).replace("/", os.sep)
+    return p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
 
 
 def split_row(line):
@@ -198,11 +231,10 @@ def main():
         except json.JSONDecodeError as e:
             results.append(("G5", False, "台账 JSON 解析失败：%s" % e))
 
-    # G6：二级测试命令是否写了（形式检查，不执行）
+    # G6：二级测试命令写了没有 + 声明的目标是否真实存在（不执行命令）
     sec8 = sec.get(8, (0, []))[1]
     sec10 = sec.get(10, (0, []))[1]
-    TEST_HINT = re.compile(r"(--selftest|--test|tests[\\/]+run_tests\.py)", re.I)
-    WAIVER_RE = re.compile(r"^[-*]?\s*二级闸门(?:豁免)?[：:]\s*(\S.*)$")
+    base = os.path.dirname(os.path.abspath(card))
     hit8, waiver = None, None
     for ln in sec8:
         s = ln.strip()
@@ -214,9 +246,23 @@ def main():
         if m:
             waiver = m.group(1).strip()
             break
+    waiver_ok = bool(waiver) and len(waiver) >= 6 and not re.fullmatch(r"(不适用|无|暂无)[。.]?", waiver)
+
     if hit8:
-        results.append(("G6", True, "命令组含二级测试：%s" % hit8[:48]))
-    elif waiver and len(waiver) >= 6 and not re.fullmatch(r"(不适用|无|暂无)[。.]?", waiver):
+        tgt = find_test_target(hit8)
+        if not tgt:
+            results.append(("G6", False,
+                "二级测试命令定位不到目标路径，无法校验存在性：%s"
+                "（请写明 tests/run_tests.py、被测 .py 或 tests 目录）" % hit8[:60]))
+        else:
+            p = target_path(base, tgt)
+            if os.path.exists(p):
+                results.append(("G6", True, "命令组含二级测试：%s；目标存在：%s" % (hit8[:40], tgt)))
+            else:
+                results.append(("G6", False,
+                    "伪造测试：第 8 段写的 %s 不存在（解析为 %s）。新卡无豁免权——"
+                    "先建测试文件，或删掉该行改走 4.4 豁免（仅限确无业务测试的项目）" % (tgt, p)))
+    elif waiver_ok:
         results.append(("G6", True, "已声明二级闸门不适用：%s" % waiver[:48]))
     else:
         results.append(("G6", False, "第 8 段缺二级测试命令（--test / --selftest / tests/run_tests.py），且第 10 段无「二级闸门豁免：<理由>」"))
