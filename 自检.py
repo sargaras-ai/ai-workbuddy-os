@@ -137,29 +137,71 @@ def check_heartbeat(d):
        "缺第七节" if "## 七" not in zongze else "")
     ok("自然语言别名" in anyu, "暗语表含自然语言别名表",
        "缺别名表" if "自然语言别名" not in anyu else "")
+    ok("软提示" in anyu, "别名表含词频分级（软提示/直连，P0-8）",
+       "别名表退化为无分级的旧版，高频词会误触发" if "软提示" not in anyu else "")
     ok(os.path.isfile(os.path.join(d, "巡检.py")), "巡检.py 存在",
        "缺巡检.py" if not os.path.isfile(os.path.join(d, "巡检.py")) else "")
 
-    # 超时红：状态文件的 last_check_at 超过 X 分钟未更新 → 红（只在有真实状态文件时查）
+    # 超时红（P0-3 两态 + P0-12 缺失不静默跳过）
     state_path = os.path.join(d, "_state", "heartbeat.json")
-    if os.path.isfile(state_path):
-        try:
-            import json as _json
-            import datetime as _dt
-            st = _json.loads(read(state_path))
-            lc = st.get("last_check_at", "")
-            if not lc:
-                ok(False, "巡检 --check 已跑过（last_check_at 非空）", "从未跑过 --check")
-            else:
-                try:
-                    last = _dt.datetime.strptime(lc, "%Y-%m-%d %H:%M:%S")
-                    mins = (_dt.datetime.now() - last).total_seconds() / 60.0
-                    ok(mins <= CHECK_TIMEOUT_MIN, "last_check_at 未超时（≤%d 分钟）" % CHECK_TIMEOUT_MIN,
-                       "已 %.0f 分钟未跑 --check（上限 %d）" % (mins, CHECK_TIMEOUT_MIN))
-                except ValueError:
-                    ok(False, "last_check_at 可解析", "格式错：%s" % lc)
-        except Exception as e:
+    is_master = (d == BASE)  # 正本（本机真实状态）才做心跳判红；副本/clone 无真实状态，只查结构
+    if not os.path.isfile(state_path):
+        # P0-12：状态文件缺失不是「可跳过」，而是「防线被绕过」的异常信号 → 判黄（提示但不阻断）
+        if is_master:
+            ok(False, "心跳状态文件存在（_state/heartbeat.json）",
+               "缺失——若被删除，超时红防线会静默失效")
+        # 副本/clone 本就没有状态文件，不判红
+        return
+
+    try:
+        import json as _json
+        import datetime as _dt
+        st = _json.loads(read(state_path))
+    except Exception as e:
+        if is_master:
             ok(False, "心跳状态文件可读", "读 %s 失败：%s" % (state_path, e))
+        return
+
+    # 两态判断：区分「用户没说话」vs「AI 漏跑」
+    #   last_seen_at = 最近一次任意活跃（工作或静默），说明「AI 被唤醒过」
+    #   last_check_at = 最近一次工作轮打卡，说明「AI 在活跃时跑了 --check」
+    #   只有「AI 被唤醒过、却长时间没跑工作 check」才是漏跑；「用户根本没说话」不判红。
+    seen = st.get("last_seen_at", "")
+    lc = st.get("last_check_at", "")
+
+    def parse_min_ago(ts):
+        try:
+            return (_dt.datetime.now() - _dt.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")).total_seconds() / 60.0
+        except (ValueError, TypeError):
+            return None
+
+    # 从未有任何活跃记录 → 引擎刚装好 / 状态被清，提示但不算「AI 失职」
+    if not seen:
+        if is_master:
+            ok(False, "心跳有活跃记录（last_seen_at 非空）",
+               "从未记录活跃——首次部署或状态被清，先跑一次 --check 建立基线")
+        return
+
+    seen_min = parse_min_ago(seen)
+    # 用户最近还在说话（活跃时间很近）但工作 check 却很久没更新 → 这才是「AI 漏跑」
+    if lc:
+        lc_min = parse_min_ago(lc)
+        if lc_min is None:
+            if is_master:
+                ok(False, "last_check_at 可解析", "格式错：%s" % lc)
+        elif lc_min > CHECK_TIMEOUT_MIN and seen_min is not None and seen_min <= CHECK_TIMEOUT_MIN:
+            # 活跃很近 + 工作打卡超时 = AI 漏跑，判红
+            if is_master:
+                ok(False, "工作轮已打卡（last_check_at 未超时）",
+                   "活跃于 %.0f 分钟前，但已 %.0f 分钟未跑工作 --check（漏跑）" % (seen_min, lc_min))
+        else:
+            ok(True, "工作打卡未漏（静默期不误报）",
+               "活跃 %.0f 分钟前 / 打卡 %.0f 分钟前" % (seen_min or 0, lc_min or 0))
+    else:
+        # 有活跃记录但从未工作打卡 → 可能是纯闲聊期，不判红（这正是 P0-3 要避免的误报）
+        if is_master:
+            ok(True, "静默期不误报（无工作打卡不判红）",
+               "有活跃记录但无工作打卡，视为纯闲聊期，不判红")
 
 
 # 布局判定：有 github_release/ 就是包目录，否则是克隆下来的仓库
@@ -206,6 +248,20 @@ else:
                     same_bytes = io.open(twin, "rb").read() == io.open(os.path.join(d, f), "rb").read()
                     ok(not same_bytes, "副本 %s 未被正本原样覆盖" % f,
                        "与正本逐字节相同 → 疑似 cp 覆盖，适配丢失" if same_bytes else "")
+
+        # 6b 副本章节骨架一致性（P1-13）：副本多一节/少一节/标题对不上 → 红
+        #     只比「章节标题序列」，不比正文——正文本就允许适配差异（如副本多一句 TURN_LIMIT 说明）
+        if is_copy and os.path.isdir(REL):
+            for f in ("总则.md", "暗语表.md"):
+                twin = os.path.join(BASE, f)
+                copy_p = os.path.join(d, f)
+                if not (os.path.isfile(twin) and os.path.isfile(copy_p)):
+                    continue
+                def _titles(path):
+                    return re.findall(r"^#{2,3}\s+.+", read(path), re.M)
+                t_main, t_copy = _titles(twin), _titles(copy_p)
+                ok(t_main == t_copy, "副本 %s 章节骨架与正本一致" % f,
+                   "正本 %d 个标题 / 副本 %d 个（漂移）" % (len(t_main), len(t_copy)) if t_main != t_copy else "")
 
 print("\n" + "=" * 66)
 print("共执行 %d 项检查" % CHECKS[0])

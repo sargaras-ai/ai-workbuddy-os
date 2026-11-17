@@ -5,12 +5,18 @@
 只做三件事，够验证「能红」即可。路由层 / Cron 时间型 属完整版。
 
 命令：
-    --check      数轮次：turn_count +1，到 TURN_LIMIT 打印「建议交接」并归零
-    --tick       报时间戳：打印上次自检时间与当前时间（只读，无副作用）
-    --self-test  负控自检：在临时目录里造「到阈值 / 不到阈值 / 状态缺失」三种情形，
-                 断言行为正确；任何一条不对即 exit 1
+    --check        工作轮：turn_count +1、写 last_check_at，到 TURN_LIMIT 打印「建议交接」并归零
+    --check --idle 静默轮（只是聊/别造）：只刷新 last_seen_at，不加 turn_count、不写 last_check_at
+    --tick         报时间戳：打印上次自检时间与当前时间（只读，无副作用）
+    --self-test    负控自检：在临时目录里造「到阈值 / 不到阈值 / 状态缺失 / 写时间戳 / idle 不计数」
+                   五种情形，断言行为正确；任何一条不对即 exit 1
 
 状态文件：_state/heartbeat.json（可由 --state <路径> 覆盖，供负控隔离）
+
+字段说明：
+    turn_count      工作轮计数（静默轮不递增）
+    last_check_at   上次工作轮打卡时间（静默轮不写）
+    last_seen_at    上次任意活跃（工作或静默）时间，供区分「用户没说话」vs「AI 漏跑」
 """
 import datetime
 import json
@@ -25,7 +31,8 @@ TURN_LIMIT = 15
 
 def load_state(path):
     if not os.path.isfile(path):
-        return {"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "", "last_check_at": ""}
+        return {"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "",
+                "last_check_at": "", "last_seen_at": ""}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -40,10 +47,18 @@ def save_state(st, path):
         json.dump(st, f, ensure_ascii=False, indent=2)
 
 
-def cmd_check(path=DEFAULT_STATE):
+def cmd_check(path=DEFAULT_STATE, idle=False):
     st = load_state(path)
+    now = _now()
+    if idle:
+        # 静默轮（只是聊/别造）：只刷新活跃时间，不计数、不写工作打卡
+        st["last_seen_at"] = now
+        save_state(st, path)
+        print("静默轮｜只刷新活跃时间，不计工作轮次")
+        return 0
     st["turn_count"] = int(st.get("turn_count", 0)) + 1
-    st["last_check_at"] = _now()
+    st["last_check_at"] = now
+    st["last_seen_at"] = now
     n = st["turn_count"]
     print("第 %d 轮" % n)
     if n >= TURN_LIMIT:
@@ -57,14 +72,17 @@ def cmd_tick(path=DEFAULT_STATE):
     st = load_state(path)
     last = st.get("last_selftest_at") or "从未"
     last_check = st.get("last_check_at") or "从未"
+    last_seen = st.get("last_seen_at") or "从未"
     now = _now()
-    print("心跳 tick｜上次自检：%s｜上次 check：%s｜现在：%s" % (last, last_check, now))
+    print("心跳 tick｜上次自检：%s｜上次 check：%s｜上次活跃：%s｜现在：%s"
+          % (last, last_check, last_seen, now))
     return 0
 
 
 def _check_once(path, start, expect_remind):
     """单条负控：造状态、跑一次 check、断言打印内容与终值。返回 bool。"""
-    save_state({"turn_count": start, "last_selftest_at": "", "last_handoff_at": ""}, path)
+    save_state({"turn_count": start, "last_selftest_at": "", "last_handoff_at": "",
+                "last_check_at": "", "last_seen_at": ""}, path)
     # 捕获 stdout
     import io
     import contextlib
@@ -106,12 +124,24 @@ def cmd_selftest():
     results.append(("N3 状态缺失重建", n3_ok, out.strip().replace("\n", " / ")))
 
     # N4：--check 必须写 last_check_at 时间戳（物理防线的数据来源）
-    save_state({"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "", "last_check_at": ""}, st_path)
+    save_state({"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "",
+                "last_check_at": "", "last_seen_at": ""}, st_path)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cmd_check(st_path)
     n4_ok = bool(load_state(st_path).get("last_check_at"))
     results.append(("N4 check 写时间戳", n4_ok, "last_check_at=%s" % load_state(st_path).get("last_check_at")))
+
+    # N5：--check --idle 只刷新 last_seen_at，不递增 turn_count、不写 last_check_at
+    save_state({"turn_count": 5, "last_selftest_at": "", "last_handoff_at": "",
+                "last_check_at": "2026-11-17 08:00:00", "last_seen_at": ""}, st_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_check(st_path, idle=True)
+    st5 = load_state(st_path)
+    n5_ok = (st5["turn_count"] == 5) and (st5["last_check_at"] == "2026-11-17 08:00:00") and bool(st5.get("last_seen_at"))
+    results.append(("N5 idle 不计数只刷新", n5_ok,
+                    "turn=%d(last_check不变=%s) seen=%s" % (st5["turn_count"], st5["last_check_at"], st5.get("last_seen_at"))))
 
     all_ok = True
     for name, ok, out in results:
@@ -137,16 +167,19 @@ def main():
     args = sys.argv[1:]
     state = DEFAULT_STATE
     cmd = None
+    idle = False
     for a in args:
         if a.startswith("--state="):
             state = a.split("=", 1)[1]
+        elif a == "--idle":
+            idle = True
         elif a.startswith("--"):
             cmd = a
     if cmd is None:
-        print("用法：巡检.py --check [--state=路径] | --tick | --self-test")
+        print("用法：巡检.py --check [--idle] [--state=路径] | --tick | --self-test")
         return 2
     if cmd == "--check":
-        return cmd_check(state)
+        return cmd_check(state, idle=idle)
     if cmd == "--tick":
         return cmd_tick(state)
     if cmd == "--self-test":
