@@ -17,6 +17,7 @@
     turn_count      工作轮计数（静默轮不递增）
     last_check_at   上次工作轮打卡时间（静默轮不写）
     last_seen_at    上次任意活跃（工作或静默）时间，供区分「用户没说话」vs「AI 漏跑」
+    last_tick_at    上次 tick 打卡时间（只有 --tick 写，与自检解耦，作告警基准）
 """
 import datetime
 import json
@@ -33,7 +34,7 @@ CHECK_TIMEOUT_MIN = 30
 def load_state(path):
     if not os.path.isfile(path):
         return {"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "",
-                "last_check_at": "", "last_seen_at": ""}
+                "last_check_at": "", "last_seen_at": "", "last_tick_at": ""}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -75,20 +76,22 @@ def _warn_log_path(path):
 
 def cmd_tick(path=DEFAULT_STATE):
     st = load_state(path)
-    last = st.get("last_selftest_at") or "从未"
+    last_tick = st.get("last_tick_at") or "从未"
     last_check = st.get("last_check_at") or "从未"
     last_seen = st.get("last_seen_at") or "从未"
     now = _now()
-    print("心跳 tick｜上次自检：%s｜上次 check：%s｜上次活跃：%s｜现在：%s"
-          % (last, last_check, last_seen, now))
+    print("心跳 tick｜上次 tick：%s｜上次 check：%s｜上次活跃：%s｜现在：%s"
+          % (last_tick, last_check, last_seen, now))
 
-    # 告警判定：上次自检为「从未」或超时 → 写告警日志（Cron 无聊天窗，控制台看不见）
+    # 告警判定（与自检解耦）：基准是 last_tick_at（只有 --tick 自己写），
+    # 不被自检.py 回写刷新，避免「自指悖论」——自检越勤、告警越永不触发。
+    # 首跑（从未 tick）或距上次 tick 超时 → 写告警日志（Cron 无聊天窗，控制台看不到）
     warn = False
-    if last == "从未":
+    if last_tick == "从未":
         warn = True
     else:
         try:
-            last_dt = datetime.datetime.strptime(last, "%Y-%m-%d %H:%M:%S")
+            last_dt = datetime.datetime.strptime(last_tick, "%Y-%m-%d %H:%M:%S")
             if (datetime.datetime.now() - last_dt).total_seconds() / 60.0 > CHECK_TIMEOUT_MIN:
                 warn = True
         except ValueError:
@@ -97,14 +100,18 @@ def cmd_tick(path=DEFAULT_STATE):
         logp = _warn_log_path(path)
         os.makedirs(os.path.dirname(logp), exist_ok=True)
         with open(logp, "a", encoding="utf-8") as f:
-            f.write("%s｜%s\n" % (_now(), "自检超时" if last != "从未" else "从未自检"))
+            f.write("%s｜%s\n" % (_now(), "tick 超时" if last_tick != "从未" else "从未 tick"))
+
+    # 最后必须回写 last_tick_at 并保存——本轮 tick 本身就是一次打卡
+    st["last_tick_at"] = now
+    save_state(st, path)
     return 0
 
 
 def _check_once(path, start, expect_remind):
     """单条负控：造状态、跑一次 check、断言打印内容与终值。返回 bool。"""
     save_state({"turn_count": start, "last_selftest_at": "", "last_handoff_at": "",
-                "last_check_at": "", "last_seen_at": ""}, path)
+                "last_check_at": "", "last_seen_at": "", "last_tick_at": ""}, path)
     # 捕获 stdout
     import io
     import contextlib
@@ -147,7 +154,7 @@ def cmd_selftest():
 
     # N4：--check 必须写 last_check_at 时间戳（物理防线的数据来源）
     save_state({"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "",
-                "last_check_at": "", "last_seen_at": ""}, st_path)
+                "last_check_at": "", "last_seen_at": "", "last_tick_at": ""}, st_path)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cmd_check(st_path)
@@ -156,7 +163,7 @@ def cmd_selftest():
 
     # N5：--check --idle 只刷新 last_seen_at，不递增 turn_count、不写 last_check_at
     save_state({"turn_count": 5, "last_selftest_at": "", "last_handoff_at": "",
-                "last_check_at": "2026-11-17 08:00:00", "last_seen_at": ""}, st_path)
+                "last_check_at": "2026-11-17 08:00:00", "last_seen_at": "", "last_tick_at": ""}, st_path)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cmd_check(st_path, idle=True)
@@ -165,16 +172,28 @@ def cmd_selftest():
     results.append(("N5 idle 不计数只刷新", n5_ok,
                     "turn=%d(last_check不变=%s) seen=%s" % (st5["turn_count"], st5["last_check_at"], st5.get("last_seen_at"))))
 
-    # N6：--tick 在「从未自检」时应追加写告警日志
+    # N6：--tick 首跑（从未 tick）应告警落盘，且回写 last_tick_at（打卡）
     save_state({"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "",
-                "last_check_at": "", "last_seen_at": ""}, st_path)
+                "last_check_at": "", "last_seen_at": "", "last_tick_at": ""}, st_path)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cmd_tick(st_path)
     logp = _warn_log_path(st_path)
-    n6_ok = os.path.isfile(logp) and ("从未自检" in io.open(logp, encoding="utf-8").read())
-    results.append(("N6 tick 告警落盘", n6_ok,
-                    "log=%s" % ("已生成" if os.path.isfile(logp) else "未生成")))
+    st6 = load_state(st_path)
+    n6_ok = (os.path.isfile(logp) and ("从未 tick" in io.open(logp, encoding="utf-8").read())
+             and bool(st6.get("last_tick_at")))
+    results.append(("N6 tick 首跑告警+打卡", n6_ok,
+                    "log=%s last_tick_at=%s" % ("已生成" if os.path.isfile(logp) else "未生成",
+                                                st6.get("last_tick_at") or "未写")))
+
+    # N7：紧接着再跑一次 tick，距上次 tick 不足阈值，不应重复告警（日志不追加）
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_tick(st_path)
+    n7_log = io.open(logp, encoding="utf-8").read()
+    n7_ok = n7_log.count("\n") == 1  # 仍只有首跑那一行
+    results.append(("N7 tick 不重复告警", n7_ok,
+                    "日志行数=%d（应仍为 1）" % n7_log.count("\n")))
 
     all_ok = True
     for name, ok, out in results:

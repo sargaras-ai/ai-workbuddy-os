@@ -205,6 +205,26 @@ def check_heartbeat(d):
                "有活跃记录但无工作打卡，视为纯闲聊期，不判红")
 
 
+# 告警上浮：tick 告警日志有内容就打印到控制台，读完即清空（Cron 无聊天窗，靠下次自检带出来）
+def check_warn_log(d):
+    logp = os.path.join(d, "_state", "tick_warnings.log")
+    if not os.path.isfile(logp):
+        return
+    try:
+        content = read(logp)
+    except Exception:
+        return
+    if content.strip():
+        print("\n[tick 告警上浮] 发现待处理告警：")
+        for ln in content.strip().split("\n"):
+            print("  ! " + ln)
+        # 读完即清空，避免下次重复上报
+        try:
+            os.remove(logp)
+        except OSError:
+            pass
+
+
 # 布局判定：有 github_release/ 就是包目录，否则是克隆下来的仓库
 ROLES = [(BASE, "正本", False), (REL, "副本", True)] if os.path.isdir(REL) else [(BASE, "副本(克隆)", True)]
 
@@ -233,6 +253,8 @@ else:
         order = check_anyu(os.path.join(d, "暗语表.md"), read(os.path.join(d, "暗语表.md")), role, is_copy)
         check_zongze(read(os.path.join(d, "总则.md")), role, order, is_copy)
         check_heartbeat(d)
+        if d == BASE:
+            check_warn_log(d)
 
         # 8 文档点名的包内文件必须真实存在（抓「HND 模板」那种悬空引用）
         docs = read(os.path.join(d, "总则.md")) + read(os.path.join(d, "暗语表.md"))
