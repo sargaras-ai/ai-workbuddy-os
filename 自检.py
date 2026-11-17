@@ -20,6 +20,7 @@
   6 副本被 cp 覆盖    正本与副本逐字节相同 —— 适配版被冲掉，最难自己发现的一种
   7 副本盘符泄漏      副本里出现 C:\\ D:\\ 之类本机路径
   8 引用悬空          文档里点名的包内文件不存在（HND 模板那种空引用）
+  9 心跳机制齐备      总则第七节 / 暗语表别名表 / 巡检.py 三者都在（重构后防漏）
 
 局限（明写）：只认字面，判不出语义；文案换了说法它看不懂，只能拦结构性问题。
 """
@@ -124,6 +125,19 @@ def check_zongze(s, role, anyu_order, is_copy):
            "" if not hits else "%d 处，首处 %.30s" % (len(hits), hits[0]))
 
 
+# 9 心跳机制齐备（重构后防漏）：三样必须都在 —— 总则第七节 / 暗语表别名表 / 巡检.py
+def check_heartbeat(d):
+    print("\n[心跳机制 %s]" % ("副本" if os.path.isdir(REL) and d == REL else "正本"))
+    zongze = read(os.path.join(d, "总则.md")) if os.path.isfile(os.path.join(d, "总则.md")) else ""
+    anyu = read(os.path.join(d, "暗语表.md")) if os.path.isfile(os.path.join(d, "暗语表.md")) else ""
+    ok("## 七、自动心跳" in zongze, "总则含第七节（自动心跳与巡检）",
+       "缺第七节" if "## 七" not in zongze else "")
+    ok("自然语言别名" in anyu, "暗语表含自然语言别名表",
+       "缺别名表" if "自然语言别名" not in anyu else "")
+    ok(os.path.isfile(os.path.join(d, "巡检.py")), "巡检.py 存在",
+       "缺巡检.py" if not os.path.isfile(os.path.join(d, "巡检.py")) else "")
+
+
 # 布局判定：有 github_release/ 就是包目录，否则是克隆下来的仓库
 ROLES = [(BASE, "正本", False), (REL, "副本", True)] if os.path.isdir(REL) else [(BASE, "副本(克隆)", True)]
 
@@ -151,6 +165,7 @@ else:
             continue
         order = check_anyu(os.path.join(d, "暗语表.md"), read(os.path.join(d, "暗语表.md")), role, is_copy)
         check_zongze(read(os.path.join(d, "总则.md")), role, order, is_copy)
+        check_heartbeat(d)
 
         # 8 文档点名的包内文件必须真实存在（抓「HND 模板」那种悬空引用）
         docs = read(os.path.join(d, "总则.md")) + read(os.path.join(d, "暗语表.md"))
