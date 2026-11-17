@@ -28,6 +28,7 @@ import io
 import os
 import re
 import sys
+import datetime
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 REL = os.path.join(BASE, "github_release")
@@ -268,6 +269,22 @@ print("共执行 %d 项检查" % CHECKS[0])
 if CHECKS[0] < 12:
     print("FAIL｜检查项过少（%d < 12），脚本自身可能被改坏" % CHECKS[0])
     sys.exit(1)
+
+# 全量跑完，回写自检时间戳到正本心跳状态（--tick 与下次超时红的基准）
+if not targets and os.path.isdir(os.path.join(BASE, "_state")):
+    import json as _json
+    state_path = os.path.join(BASE, "_state", "heartbeat.json")
+    st = {}
+    if os.path.isfile(state_path):
+        try:
+            st = _json.loads(read(state_path))
+        except Exception:
+            st = {}
+    st["last_selftest_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    with io.open(state_path, "w", encoding="utf-8") as f:
+        _json.dump(st, f, ensure_ascii=False, indent=2)
+
 if fails:
     print("FAIL %d 项：" % len(fails))
     for x in fails:

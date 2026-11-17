@@ -27,6 +27,7 @@ import tempfile
 BASE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_STATE = os.path.join(BASE, "_state", "heartbeat.json")
 TURN_LIMIT = 15
+CHECK_TIMEOUT_MIN = 30
 
 
 def load_state(path):
@@ -68,6 +69,10 @@ def cmd_check(path=DEFAULT_STATE, idle=False):
     return 0
 
 
+def _warn_log_path(path):
+    return os.path.join(os.path.dirname(path), "tick_warnings.log")
+
+
 def cmd_tick(path=DEFAULT_STATE):
     st = load_state(path)
     last = st.get("last_selftest_at") or "从未"
@@ -76,6 +81,23 @@ def cmd_tick(path=DEFAULT_STATE):
     now = _now()
     print("心跳 tick｜上次自检：%s｜上次 check：%s｜上次活跃：%s｜现在：%s"
           % (last, last_check, last_seen, now))
+
+    # 告警判定：上次自检为「从未」或超时 → 写告警日志（Cron 无聊天窗，控制台看不见）
+    warn = False
+    if last == "从未":
+        warn = True
+    else:
+        try:
+            last_dt = datetime.datetime.strptime(last, "%Y-%m-%d %H:%M:%S")
+            if (datetime.datetime.now() - last_dt).total_seconds() / 60.0 > CHECK_TIMEOUT_MIN:
+                warn = True
+        except ValueError:
+            warn = True  # 时间戳格式坏，视为异常
+    if warn:
+        logp = _warn_log_path(path)
+        os.makedirs(os.path.dirname(logp), exist_ok=True)
+        with open(logp, "a", encoding="utf-8") as f:
+            f.write("%s｜%s\n" % (_now(), "自检超时" if last != "从未" else "从未自检"))
     return 0
 
 
@@ -142,6 +164,17 @@ def cmd_selftest():
     n5_ok = (st5["turn_count"] == 5) and (st5["last_check_at"] == "2026-11-17 08:00:00") and bool(st5.get("last_seen_at"))
     results.append(("N5 idle 不计数只刷新", n5_ok,
                     "turn=%d(last_check不变=%s) seen=%s" % (st5["turn_count"], st5["last_check_at"], st5.get("last_seen_at"))))
+
+    # N6：--tick 在「从未自检」时应追加写告警日志
+    save_state({"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "",
+                "last_check_at": "", "last_seen_at": ""}, st_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_tick(st_path)
+    logp = _warn_log_path(st_path)
+    n6_ok = os.path.isfile(logp) and ("从未自检" in io.open(logp, encoding="utf-8").read())
+    results.append(("N6 tick 告警落盘", n6_ok,
+                    "log=%s" % ("已生成" if os.path.isfile(logp) else "未生成")))
 
     all_ok = True
     for name, ok, out in results:
