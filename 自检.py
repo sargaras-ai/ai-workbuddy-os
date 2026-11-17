@@ -39,6 +39,9 @@ PACKAGE_FILES = ["总则.md", "暗语表.md", "卡模板.md", "P-00-空白卡.md
 CHECKS = [0]
 fails = []
 
+# 心跳超时阈值（分钟）：last_check_at 距现在超过它，自检判红
+CHECK_TIMEOUT_MIN = 30
+
 
 def ok(cond, label, detail=""):
     CHECKS[0] += 1
@@ -136,6 +139,27 @@ def check_heartbeat(d):
        "缺别名表" if "自然语言别名" not in anyu else "")
     ok(os.path.isfile(os.path.join(d, "巡检.py")), "巡检.py 存在",
        "缺巡检.py" if not os.path.isfile(os.path.join(d, "巡检.py")) else "")
+
+    # 超时红：状态文件的 last_check_at 超过 X 分钟未更新 → 红（只在有真实状态文件时查）
+    state_path = os.path.join(d, "_state", "heartbeat.json")
+    if os.path.isfile(state_path):
+        try:
+            import json as _json
+            import datetime as _dt
+            st = _json.loads(read(state_path))
+            lc = st.get("last_check_at", "")
+            if not lc:
+                ok(False, "巡检 --check 已跑过（last_check_at 非空）", "从未跑过 --check")
+            else:
+                try:
+                    last = _dt.datetime.strptime(lc, "%Y-%m-%d %H:%M:%S")
+                    mins = (_dt.datetime.now() - last).total_seconds() / 60.0
+                    ok(mins <= CHECK_TIMEOUT_MIN, "last_check_at 未超时（≤%d 分钟）" % CHECK_TIMEOUT_MIN,
+                       "已 %.0f 分钟未跑 --check（上限 %d）" % (mins, CHECK_TIMEOUT_MIN))
+                except ValueError:
+                    ok(False, "last_check_at 可解析", "格式错：%s" % lc)
+        except Exception as e:
+            ok(False, "心跳状态文件可读", "读 %s 失败：%s" % (state_path, e))
 
 
 # 布局判定：有 github_release/ 就是包目录，否则是克隆下来的仓库

@@ -25,9 +25,13 @@ TURN_LIMIT = 15
 
 def load_state(path):
     if not os.path.isfile(path):
-        return {"turn_count": 0, "last_selftest_at": "", "last_handoff_at": ""}
+        return {"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "", "last_check_at": ""}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _now():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def save_state(st, path):
@@ -39,6 +43,7 @@ def save_state(st, path):
 def cmd_check(path=DEFAULT_STATE):
     st = load_state(path)
     st["turn_count"] = int(st.get("turn_count", 0)) + 1
+    st["last_check_at"] = _now()
     n = st["turn_count"]
     print("第 %d 轮" % n)
     if n >= TURN_LIMIT:
@@ -51,8 +56,9 @@ def cmd_check(path=DEFAULT_STATE):
 def cmd_tick(path=DEFAULT_STATE):
     st = load_state(path)
     last = st.get("last_selftest_at") or "从未"
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print("心跳 tick｜上次自检：%s｜现在：%s" % (last, now))
+    last_check = st.get("last_check_at") or "从未"
+    now = _now()
+    print("心跳 tick｜上次自检：%s｜上次 check：%s｜现在：%s" % (last, last_check, now))
     return 0
 
 
@@ -98,6 +104,14 @@ def cmd_selftest():
     out = buf.getvalue()
     n3_ok = ("第 1 轮" in out) and (load_state(st_path)["turn_count"] == 1)
     results.append(("N3 状态缺失重建", n3_ok, out.strip().replace("\n", " / ")))
+
+    # N4：--check 必须写 last_check_at 时间戳（物理防线的数据来源）
+    save_state({"turn_count": 0, "last_selftest_at": "", "last_handoff_at": "", "last_check_at": ""}, st_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        cmd_check(st_path)
+    n4_ok = bool(load_state(st_path).get("last_check_at"))
+    results.append(("N4 check 写时间戳", n4_ok, "last_check_at=%s" % load_state(st_path).get("last_check_at")))
 
     all_ok = True
     for name, ok, out in results:
