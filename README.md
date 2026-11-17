@@ -3,6 +3,9 @@
 > **一句话**：让 AI 不再靠记忆干活，而是靠**卡片 + 台账 + 闸门**干活。
 > 说一句暗语，它建卡、写台账、过闸门；卡不过，它不能声称做完。
 
+> **2.0 能力全景（心跳闭环 / 权限 / 底线 / 进化史）见 [`README-2.0.md`](README-2.0.md)。**
+> **2.0 capability overview (heartbeat / permissions / boundaries / evolution) → [`README-2.0.md`](README-2.0.md).**
+
 [中文](#中文) · [English](#english)
 
 ---
