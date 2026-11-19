@@ -68,9 +68,9 @@ Cron 每小时跑 `--tick`，超时告警写进日志；下次跑自检时，机
 
 ### 6. 防腐自检 · Anti-rot self-check
 
-改完规则必跑 `自检.py`：查总则和暗语表有没有各说一套、副本有没有被 `cp` 冲掉、点名的文件还在不在。37 项全过才许推。
+改完规则必跑 `自检.py`：查总则和暗语表有没有各说一套、副本有没有被 `cp` 冲掉、点名的文件还在不在。全绿（末行 `PASS`）才许推。
 
-> After any rule edit, `自检.py` runs 37 checks — consistency, no `cp`-clobbered copy, no dangling file references. Green before push.
+> After any rule edit, `自检.py` runs its checks — consistency, no `cp`-clobbered copy, no dangling file references. Green (trailing `PASS`) before push.
 
 ---
 
@@ -138,7 +138,7 @@ Cron 每小时跑 `--tick`，超时告警写进日志；下次跑自检时，机
 |---|---|---|
 | 谁执行规则 · Who enforces | 靠 AI 记性 | 机器逐字匹配 API，不猜 |
 | 偷懒查得出来吗 · Detectable slacking | 查不出 | 心跳超时判红 |
-| 规则腐化谁发现 · Who spots rule rot | 靠人偶然撞见 | 自检 37 项，绿了才许推 |
+| 规则腐化谁发现 · Who spots rule rot | 靠人偶然撞见 | 自检跑全套，绿了才许推 |
 | 告警去哪 · Where alerts go | 无 | 落盘 + 下次自检上浮，不丢 |
 | 闸门能拦住吗 · Gates that block | 写个 `exit 0` 就过 | 零断言判红，负控证明真能拦 |
 

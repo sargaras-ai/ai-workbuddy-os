@@ -33,7 +33,7 @@
 卡模板.md    记在哪（15 段固定结构，状态行派生不手填）
 card_gate.py 形式卡口（G1–G7 七项机器检查，退出码说话；只管卡的结构，不管代码算得对不对）
 开卡.py      怎么开工（一条命令建卡、写台账、追加索引、跑闸门）
-自检.py      防腐剂（规则自己有没有改歪、副本有没有被 cp 冲掉；包内 26 项，clone 后 13 项）
+自检.py      防腐剂（规则自己有没有改歪、副本有没有被 cp 冲掉；项数以实测输出的「共执行 N 项」为准）
 ```
 
 ### 三分钟上手
@@ -64,11 +64,12 @@ python 开卡.py P-03-myproject
 
 ```bash
 python 自检.py
-# PASS 规则自检：13 项全过
+# PASS 规则自检：N 项全过（N 以你机器上的实测输出为准，不写死）
 ```
 
-> 项数为什么是 13 而不是 26：包里那份（作者本机）会额外查「发布副本是否被正本 `cp` 覆盖」等 13 项，
-> 需要正本与 `github_release/` 并存才成立。你 clone 下来只有一份文档，跑的就是这 13 项。
+> 项数为什么 clone 比作者本机少：作者本机的包目录会额外查「发布副本是否被正本 `cp` 覆盖」等
+> 需要正本与 `github_release/` 并存才成立的项。你 clone 下来只有一份文档，跑的就是少的那一档。
+> 具体多少项，看末行 `共执行 N 项检查`，别信这里写死的数字。
 
 典型能拦住的事：改了暗语表却忘了同步总则里那份排序（两份规则各说一套）、新增口令没登记生命周期、
 副本被正本原样 `cp` 覆盖（适配丢失，路径泄漏会跟着回来）。
@@ -140,7 +141,7 @@ ai-workbuddy-os/
 ├── 通用坑.md            跨项目坑池（同一坑在 ≥2 个项目复现才收进来）
 ├── card_gate.py         闸门（仅标准库）
 ├── 开卡.py              开卡器（仅标准库，全相对路径）
-├── 自检.py              规则自检：文档自洽 + 副本未被 cp 覆盖（包内 26 项 / clone 后 13 项）
+├── 自检.py              规则自检：文档自洽 + 副本未被 cp 覆盖（项数以实测输出为准）
 ├── MEMORY.example.md    记忆文件模板（请抄成你自己的）
 ├── LICENSE              MIT（版权人 sargaras）
 └── 示例/
@@ -206,7 +207,7 @@ card_gate.py Who may say done  — 7 machine checks, verdict by exit code
 git clone <this-repo> ai-workbuddy-os && cd ai-workbuddy-os
 python card_gate.py 示例/项目卡-示例.md     # 结论：通过（7/7） — see a passing card
 python 开卡.py P-03-myproject              # create your own
-python 自检.py                             # PASS 规则自检：13 项全过 — rules still self-consistent
+python 自检.py                             # PASS 规则自检：N 项全过（N = 实测，见末行） — rules still self-consistent
 ```
 
 Then make it a hard gate — a `.git/hooks/pre-commit` running `python 自检.py || exit 1`, or the

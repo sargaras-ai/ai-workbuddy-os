@@ -56,7 +56,7 @@ AI 长期做项目会掉数据：上下文压缩后忘了第 3 轮定的技术�
 | `开工.py` | 铺项目骨架（8 件套） | `python 开工.py <目录>`（**禁用 `--force`**） |
 | `card_gate.py` | 一级闸门（G1–G7） | `python card_gate.py <项目卡路径>` |
 | `巡检.py` | 心跳打卡 / 告警 | `--check` / `--check --idle` / `--tick` / `--self-test` |
-| `自检.py` | 规则防腐（clone 后 13 项） | `python 自检.py`（改规则后必跑，绿了才许推） |
+| `自检.py` | 规则防腐（项数以实测输出为准） | `python 自检.py`（改规则后必跑，绿了才许推） |
 
 > 解释器：用全路径（Win7 无 PATH）；禁止只写裸 `python`。项目内二级测试命令须按卡第 8 段写全路径。
 > 本仓库开源版不含 `开工.py` / `check_memory.py` / `push_release.py`（属作者本机私有件，见 `总则.md` 第二节与 `README.md`）。

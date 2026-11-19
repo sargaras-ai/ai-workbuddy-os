@@ -131,7 +131,7 @@ def check_zongze(s, role, anyu_order, is_copy):
 
 # 9 心跳机制齐备（重构后防漏）：三样必须都在 —— 总则第七节 / 暗语表别名表 / 巡检.py
 def check_heartbeat(d):
-    print("\n[心跳机制 %s]" % ("副本" if os.path.isdir(REL) and d == REL else "正本"))
+    print("\n[心跳机制 %s]" % ("副本" if is_package_layout() and d == REL else ("正本" if is_master_dir(d) else "副本(克隆)")))
     zongze = read(os.path.join(d, "总则.md")) if os.path.isfile(os.path.join(d, "总则.md")) else ""
     anyu = read(os.path.join(d, "暗语表.md")) if os.path.isfile(os.path.join(d, "暗语表.md")) else ""
     ok("## 七、自动心跳" in zongze, "总则含第七节（自动心跳与巡检）",
@@ -145,7 +145,7 @@ def check_heartbeat(d):
 
     # 超时红（P0-3 两态 + P0-12 缺失不静默跳过）
     state_path = os.path.join(d, "_state", "heartbeat.json")
-    is_master = (d == BASE)  # 正本（本机真实状态）才做心跳判红；副本/clone 无真实状态，只查结构
+    is_master = is_master_dir(d)  # 正本（本机真实状态）才做心跳判红；副本/clone 无真实状态，只查结构
     if not os.path.isfile(state_path):
         # P0-12：状态文件缺失不是「可跳过」，而是「防线被绕过」的异常信号 → 判黄（提示但不阻断）
         if is_master:
@@ -225,8 +225,58 @@ def check_warn_log(d):
             pass
 
 
+# 10 承诺对账（B5 根治）：文档里写死「自检 N 项」的数字承诺，必须等于本布局实测项数。
+#    审计结论：B1/B3 全因「README 写 13 项、实测 18 项」这种承诺漂移没人管。本函数扫描
+#    README*.md 里所有「自检」语境下的写死数字，与实测 expect_count 做减法，不一致直接报红。
+#    B3 已把写死数字改成「以实测为准」，此闸门防的是「未来又写死且写错」。
+#    注意：本函数是「元检查」，不调 ok() 计数（否则会污染「共执行 N 项」），只往 fails 追加。
+def check_promise_ledger(d, expect_count):
+    print("\n[承诺对账 %s]" % ("正本" if is_master_dir(d) else "副本(克隆)"))
+    readmes = [os.path.join(d, "README.md"), os.path.join(d, "README-2.0.md")]
+    readmes = [p for p in readmes if os.path.isfile(p)]
+    if not readmes:
+        print("  （无 README，跳过承诺对账）")
+        return
+    found_any = False
+    for rp in readmes:
+        txt = read(rp)
+        for m in re.finditer(r"自检[^\n]{0,40}?(\d+)\s*项", txt):
+            num = int(m.group(1))
+            found_any = True
+            if num != expect_count:
+                fails.append("承诺对账（%s 写「自检 %s 项」）：实测本布局 %d 项 → 漂移"
+                             % (os.path.basename(rp), num, expect_count))
+        for m in re.finditer(r"PASS\s*规则自检[^\n]{0,30}?(\d+)\s*项", txt):
+            num = int(m.group(1))
+            found_any = True
+            if num != expect_count:
+                fails.append("承诺对账（%s 写「PASS ... %s 项」）：实测本布局 %d 项 → 漂移"
+                             % (os.path.basename(rp), num, expect_count))
+    if found_any:
+        print("  扫到写死项数承诺，已与实测 %d 项比对" % expect_count)
+    else:
+        print("  未扫到写死自检项数（B3 达标，以实测为准，不会漂移）")
+
+
+# 布局判定：有 github_release/ 就是包目录（正本 + 副本），否则是克隆下来的仓库（只有一份）
+# B2 根因修复：身份判定统一成下面两个函数，三处（心跳标签 / is_master / ROLES）都调它，
+#             不再各自用「d==BASE」「d==REL」「有没有子目录」三种口径互相打架。
+def is_package_layout():
+    """是否有 github_release/ 子目录 —— 这是「作者包目录」最硬的一条硬盘事实。"""
+    return os.path.isdir(REL)
+
+
+def is_master_dir(d):
+    """d 是否为「正本」（有真实心跳状态、要判超时红）的那一侧。
+    clone 布局下 d 就是 BASE，但因为没有 github_release/，它只是「唯一一份」，
+    不是「正本」——必须用 is_package_layout() 区分，否则 clone 会被误判成正本、
+    要求一个 clone 里永远不存在的 _state/heartbeat.json（B2 的 18 项 FAIL 1 就出在这）。
+    """
+    return is_package_layout() and d == BASE
+
+
 # 布局判定：有 github_release/ 就是包目录，否则是克隆下来的仓库
-ROLES = [(BASE, "正本", False), (REL, "副本", True)] if os.path.isdir(REL) else [(BASE, "副本(克隆)", True)]
+ROLES = [(BASE, "正本", False), (REL, "副本", True)] if is_package_layout() else [(BASE, "副本(克隆)", True)]
 
 targets = sys.argv[1:]
 if targets:
@@ -291,6 +341,11 @@ print("共执行 %d 项检查" % CHECKS[0])
 if CHECKS[0] < 12:
     print("FAIL｜检查项过少（%d < 12），脚本自身可能被改坏" % CHECKS[0])
     sys.exit(1)
+
+# 承诺对账（B5）：无参数全量跑完后，用定格后的实测项数扫 README 写死数字，漂移则报红
+if not targets:
+    check_promise_ledger(BASE, CHECKS[0])
+
 
 # 全量跑完，回写自检时间戳到正本心跳状态（--tick 与下次超时红的基准）
 if not targets and os.path.isdir(os.path.join(BASE, "_state")):
