@@ -32,10 +32,13 @@
         声明是否附测试证据；但不执行测试、不判证据的 PASS/FAIL 数字本身是真是假——
         数字真假仍要人看（和 G7 同一层局限）。
 """
+import hashlib
 import json
 import os
 import re
+import shlex
 import sys
+import tempfile
 import datetime as _dt
 
 PLACEHOLDER = ("待定",)
@@ -77,6 +80,48 @@ FIRST_RED_RE = re.compile(r"首跑红\s+(\d{4}-\d{2}-\d{2})\s*[｜|]\s*FAIL\s+([
 # G9：verified 证据 —— 修 bug 声明 verified 必须附「PASS n 且 FAIL 0」（总则 4.11）。
 VERIFIED_EVIDENCE_RE = re.compile(r"verified", re.I)
 PASS_FAIL_OK_RE = re.compile(r"PASS\s+[1-9]\d*\b.*\bFAIL\s+0\b|FAIL\s+0\b.*\bPASS\s+[1-9]\d*\b")
+
+# 原子写入的临时文件后缀（同目录 temp + os.replace 原子替换用）
+_ATOMIC_SUFFIX = ".wb-tmp"
+
+
+def atomic_write_text(path, text, fsync_dir=False):
+    """同目录临时文件 + flush/fsync + os.replace 原子写文本。
+
+    步骤：
+      1. 在同目录创建临时文件（继承目录权限，跨盘问题由同目录规避）
+      2. 写入后 flush + fsync（刷到磁盘，防崩溃留下 0 字节/半截）
+      3. os.replace 原子替换目标（Windows/POSIX 同目录 rename 原子）
+    任何一步失败：删掉临时文件，绝不留半截垃圾；异常向上抛给调用方捕获。
+    返回 None。
+    """
+    target_dir = os.path.dirname(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(prefix=".wb-", suffix=_ATOMIC_SUFFIX, dir=target_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        # os.replace 原子替换；目标被锁（Win32 独占）时此处抛 PermissionError，由调用方捕获
+        os.replace(tmp_path, path)
+        if fsync_dir:
+            # 刷目录项，确保 rename 本身落盘（尽力而为，Windows 上目录 fsync 不可靠则跳过）
+            try:
+                _dfd = os.open(target_dir, os.O_RDONLY)
+                try:
+                    os.fsync(_dfd)
+                finally:
+                    os.close(_dfd)
+            except OSError:
+                pass
+    except Exception:
+        # 失败：清掉临时文件，不留半截垃圾
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def extract_command(raw):
@@ -185,6 +230,37 @@ def split_row(line):
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+def file_fingerprint(path):
+    """取文件指纹 (mtime_ns, size, sha256)，用于写回前复核是否被外部改动。
+
+    文件不存在返回 None。读失败（锁/权限）抛 OSError，由调用方捕获。
+    """
+    if not os.path.isfile(path):
+        return None
+    st = os.stat(path)
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return (st.st_mtime_ns, st.st_size, h.hexdigest())
+
+
+def validate_red_date(date_str, now=None):
+    """校验首跑红日期语义：格式对 + datetime.fromisoformat 能解析 + 不晚于今天。
+
+    返回 (ok, 错误信息)。ok=True 表示日期合法。
+    堵住「2030 年」「13 月 45 日」这类正则能过、语义非法的日期。
+    """
+    now = now or _dt.datetime.now()
+    try:
+        d = _dt.datetime.fromisoformat(date_str).date()
+    except ValueError:
+        return (False, "日期 %s 不是真实日期（如 13 月 45 日）" % date_str)
+    if d > now.date():
+        return (False, "日期 %s 晚于今天（%s），疑似穿越日期" % (date_str, now.date().isoformat()))
+    return (True, "")
+
+
 def seal_archive(card_id, version, base_dir, test_summary=None, acc_rows=None):
     """封版通过后写归档摘要到 <base_dir>/_归档/YYYYMMDD-vX.md。
 
@@ -213,28 +289,36 @@ def seal_archive(card_id, version, base_dir, test_summary=None, acc_rows=None):
     ver = version if version else f"v{seq}"
     fname = f"{date}-{ver}.md"
     path = os.path.join(archive_dir, fname)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(f"# 封版归档 {card_id} · {ver}\n\n")
-        f.write(f"- 封版时间：{stamp.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"- 卡号：{card_id}\n")
-        f.write(f"- 版本号：{ver}\n")
-        f.write(f"- 归档目的：记录旧版指标，作为回滚对比基准（只读）\n\n")
-        f.write("## 旧版指标\n\n")
-        if acc_rows:
-            f.write("### 验收口径（第 9 段逐条）\n\n")
-            for i, cells in enumerate(acc_rows, 1):
-                # 第 9 段列序：编号 | 动作 | 期望结果 | 失败表现 | 测试标识
-                action = cells[1] if len(cells) > 1 else ""
-                expect = cells[2] if len(cells) > 2 else ""
-                f.write("- %d. %s → 期望 %s\n" % (i, action, expect))
-            f.write("\n")
-        else:
-            f.write("- 验收口径：见项目卡第 9 段「验收」表\n\n")
-        if test_summary:
-            f.write(f"### 二级测试（真实回执）\n\n- {test_summary}\n\n")
-        else:
-            f.write("- 二级测试：未执行（本次封版未跑二级命令）\n\n")
-        f.write("> 本文件由 `card_gate.py --seal` 生成。索引同步由封版动作另行更新。\n")
+    body = []
+    body.append(f"# 封版归档 {card_id} · {ver}\n\n")
+    body.append(f"- 封版时间：{stamp.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    body.append(f"- 卡号：{card_id}\n")
+    body.append(f"- 版本号：{ver}\n")
+    body.append(f"- 归档目的：记录旧版指标，作为回滚对比基准（只读）\n\n")
+    body.append("## 旧版指标\n\n")
+    if acc_rows:
+        body.append("### 验收口径（第 9 段逐条）\n\n")
+        for i, cells in enumerate(acc_rows, 1):
+            # 第 9 段列序：编号 | 动作 | 期望结果 | 失败表现 | 测试标识
+            action = cells[1] if len(cells) > 1 else ""
+            expect = cells[2] if len(cells) > 2 else ""
+            body.append("- %d. %s → 期望 %s\n" % (i, action, expect))
+        body.append("\n")
+    else:
+        body.append("- 验收口径：见项目卡第 9 段「验收」表\n\n")
+    if test_summary:
+        body.append(f"### 二级测试（真实回执）\n\n- {test_summary}\n\n")
+    else:
+        body.append("- 二级测试：未执行（本次封版未跑二级命令）\n\n")
+    body.append("> 本文件由 `card_gate.py --seal` 生成。索引同步由封版动作另行更新。\n")
+    try:
+        atomic_write_text(path, "".join(body))
+    except PermissionError as e:
+        print("归档：写入失败——文件被独占锁定或无写权限，已放弃且未留半截文件：%s" % e)
+        raise
+    except OSError as e:
+        print("归档：写入失败——%s" % e)
+        raise
     return path
 
 
@@ -246,7 +330,11 @@ def run_secondary_test(cmd, base):
     """
     import subprocess
     clean = extract_command(cmd)
-    parts = clean.split()
+    # 用 shlex.split 而非 split()：支持带引号的中文空格路径（如 "我的 测试/run_tests.py"）
+    try:
+        parts = shlex.split(clean, posix=True)
+    except ValueError as e:
+        return None, "命令引号不闭合，无法解析：%s" % e
     if not parts:
         return None, ""
     try:
@@ -287,6 +375,11 @@ def update_index(card_id, version, index_path):
     """
     if not os.path.isfile(index_path):
         return ("not_found", "索引.md 不存在")
+    # 写回前先记录打开时刻的文件指纹，后面写回前再复核，防 TOCTOU（静默覆盖你手改的内容）
+    try:
+        fingerprint_before = file_fingerprint(index_path)
+    except OSError as e:
+        return ("abnormal", "读取索引指纹失败（可能被锁）：%s" % e)
     with open(index_path, encoding="utf-8") as f:
         lines = f.read().splitlines()
 
@@ -356,8 +449,22 @@ def update_index(card_id, version, index_path):
                 changed = True
     if changed:
         lines[i] = "| " + " | ".join(new_cells) + " |"
-        with open(index_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write("\n".join(lines) + "\n")
+        new_text = "\n".join(lines) + "\n"
+        # TOCTOU 复核：写回前重新取指纹，若与打开时不一致 → 说明文件被外部改过，拒绝覆盖
+        try:
+            fingerprint_now = file_fingerprint(index_path)
+        except OSError as e:
+            return ("abnormal", "写回前复核索引失败（可能被锁）：%s" % e)
+        if fingerprint_now != fingerprint_before:
+            return ("abnormal",
+                    "索引已被外部修改（mtime/size/sha256 与读取时不一致），拒绝覆盖，"
+                    "你手改的内容已保住，请先解决冲突再重试")
+        try:
+            atomic_write_text(index_path, new_text)
+        except PermissionError as e:
+            return ("abnormal", "索引被独占锁定，无法写入（已放弃，未留半截文件）：%s" % e)
+        except OSError as e:
+            return ("abnormal", "索引写入失败：%s" % e)
         return ("ok", "已更新 %s 的封版状态与最后变更日" % card_id)
     return ("ok", "卡号 %s 状态已是「已封版 %s」，无需改动" % (card_id, version))
 
@@ -668,6 +775,30 @@ def main():
                 first_red_fake = [d for d in decisions
                                   if "首跑红" in d and not FIRST_RED_RE.search(d)]
 
+                # 虎1.5：日期语义校验 —— 正则能过但日期非法的（2030 年 / 13 月 45 日）
+                #         一律判红。用 datetime.fromisoformat 验证真实存在，且不晚于今天。
+                now = _dt.datetime.now()
+                first_red_bad_date = []
+                for d in first_red_ok:
+                    m = FIRST_RED_RE.search(d)
+                    date_str = m.group(1)
+                    ok, err = validate_red_date(date_str, now=now)
+                    if not ok:
+                        first_red_bad_date.append("「%s」%s" % (date_str, err))
+                # 时钟异常告警：台账里声明的最新日期若比系统时间还晚 → 亮灯（不判红）
+                clock_warn = []
+                for d in decisions:
+                    md = re.search(r"(\d{4}-\d{2}-\d{2})", d)
+                    if md:
+                        try:
+                            dd = _dt.datetime.fromisoformat(md.group(1)).date()
+                        except ValueError:
+                            continue
+                        if dd > now.date():
+                            clock_warn.append(
+                                "台账日期 %s 晚于系统时间 %s（时钟异常或时区跨日）"
+                                % (md.group(1), now.date().isoformat()))
+
                 # 虎3：verified 声明必须附测试证据（PASS n 且 FAIL 0）
                 bad_verified = [d for d in decisions
                                 if VERIFIED_EVIDENCE_RE.search(d)
@@ -682,6 +813,10 @@ def main():
                     problems.append(
                         "写了二级测试命令，但台账 decisions 没有格式合规的「首跑红 YYYY-MM-DD｜FAIL n｜<测试标识>」记录。"
                         "总则 4.8：任何涉及逻辑的业务代码修改，必须先写测试、跑红留证才许写业务代码。缺此记录，封版判红。")
+                if first_red_bad_date:
+                    problems.append(
+                        "首跑红日期语义非法（不是真实日期，或晚于今天）：" +
+                        "；".join(first_red_bad_date))
                 if bad_verified:
                     problems.append(
                         "decisions 里有声明 verified 但未附测试输出证据（须 PASS n 且 FAIL 0）的记录：%s" %
@@ -690,8 +825,12 @@ def main():
                 if problems:
                     results.append(("G9", False, "；".join(problems)))
                 else:
-                    results.append(("G9", True,
-                        "首跑红记录格式合规（%d 条），verified 声明均附测试证据" % len(first_red_ok)))
+                    detail = "首跑红记录格式合规（%d 条），verified 声明均附测试证据" % len(first_red_ok)
+                    if clock_warn:
+                        detail += "；⚠ 时钟告警：" + "；".join(clock_warn)
+                        # 时钟告警单独打印到 stderr 亮灯，不污染 G9 通过结论
+                        print("⚠ 时钟异常告警：" + "；".join(clock_warn), file=sys.stderr)
+                    results.append(("G9", True, detail))
             except json.JSONDecodeError as e:
                 results.append(("G9", False, "台账 JSON 解析失败：%s" % e))
     else:
@@ -718,8 +857,12 @@ def main():
                 _dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
         # 2) 回填验收口径（第 9 段真实行）
         acc_rows = table_rows(sec.get(9, (0, []))[1])
-        ap = seal_archive(card_id, seal_ver, base_dir, test_summary=test_summary,
-                          acc_rows=acc_rows)
+        try:
+            ap = seal_archive(card_id, seal_ver, base_dir, test_summary=test_summary,
+                              acc_rows=acc_rows)
+        except (PermissionError, OSError) as e:
+            print("封版失败：归档写入异常，已中止（未留半截文件）——%s" % e)
+            return 1
         print("归档：已生成 %s" % ap)
         # 3) 同步索引（状态→已封版 vX，最后变更日→今天）
         index_path = os.path.join(base_dir, "索引.md")
