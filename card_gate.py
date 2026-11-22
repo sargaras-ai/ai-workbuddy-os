@@ -45,8 +45,17 @@ HEAD_RE = re.compile(r"^## (\d+)\s")
 EMPTY_TALK_RE = re.compile(r"^[\s（(]*(失败|异常|报错|有问题|不正常|表现异常|无|暂无)[\s。）)]*$")
 
 # 二级测试：命令特征 + 豁免声明
-TEST_HINT = re.compile(r"(--selftest\b|--test\b|tests[\\/]+run_tests\.py)", re.I)
+# TEST_HINT 要能识别「运行：python ...」「二级测试：python ...」「测试：pytest ...」等
+# 各种前缀写法，核心是命令里含可执行特征（解释器 + 测试入口 / --test / --selftest / pytest）。
+TEST_HINT = re.compile(r"(--selftest\b|--test\b|tests[\\/]+run_tests\.py|\bpytest\b|\bpython\b|\bpython3\b)", re.I)
 WAIVER_RE = re.compile(r"^[-*]?\s*二级闸门(?:豁免)?[：:]\s*(\S.*)$")
+
+# 命令前缀：第 8 段里写在真正命令前的标签，如「运行」「二级测试」「二级闸门」「测试命令」等
+CMD_PREFIX_RE = re.compile(
+    r"^[\s\-*`>]*"
+    r"(?:二级(?:测试|闸门)|测试命令|测试|运行命令|运行|执行|命令|跑)[：:]\s*"
+    r"|^[\s\-*`>]*(?:二级(?:测试|闸门)|测试命令|运行命令|运行|执行)[\s：:]+",
+    re.I)
 
 # G9：首跑红记录格式（总则 4.8 第 3 步）：首跑红 YYYY-MM-DD｜FAIL n｜<测试标识列表>
 # 必须带具体日期（YYYY-MM-DD）、FAIL n（n≥1）、以及至少一个非空测试标识。
@@ -55,6 +64,28 @@ FIRST_RED_RE = re.compile(r"首跑红\s+(\d{4}-\d{2}-\d{2})\s*[｜|]\s*FAIL\s+([
 # G9：verified 证据 —— 修 bug 声明 verified 必须附「PASS n 且 FAIL 0」（总则 4.11）。
 VERIFIED_EVIDENCE_RE = re.compile(r"verified", re.I)
 PASS_FAIL_OK_RE = re.compile(r"PASS\s+[1-9]\d*\b.*\bFAIL\s+0\b|FAIL\s+0\b.*\bPASS\s+[1-9]\d*\b")
+
+
+def extract_command(raw):
+    """从第 8 段的一行里提取真正的可执行命令。
+
+    识别并剥离各种前缀标签（运行 / 二级测试 / 二级闸门 / 测试命令 / 测试 / 执行 等），
+    返回干净的「解释器 + 参数」字符串。剥不掉前缀则原样返回（去首尾空白与列表符号）。
+    """
+    s = raw.strip().lstrip("-* `>").strip()
+    # 1) 先尝试用前缀正则剥离（「运行：python ...」「二级测试：python ...」）
+    m = CMD_PREFIX_RE.match(s)
+    if m:
+        s = s[m.end():].strip()
+        s = s.lstrip("-* `>").strip()
+    # 2) 若剥完仍以中文标签开头（如「运行 python tests」无冒号），再按常见标签硬切一次
+    for label in ("二级测试", "二级闸门", "测试命令", "运行命令", "运行", "执行"):
+        if s.startswith(label):
+            rest = s[len(label):].lstrip("：: -").strip()
+            if rest:
+                s = rest
+                break
+    return s
 
 
 def find_test_target(cmd):
@@ -178,13 +209,10 @@ def run_secondary_test(cmd, base):
     """实际执行第 8 段的二级测试命令，返回 (exit_code, 输出全文)。
 
     从输出里抓 PASS/FAIL 数字。命令相对卡所在目录（base）执行。
-    解释器用「全路径」：优先按命令里的解释器字面执行（如 python / pytest）。
-    命令可能带「二级测试：」这类标签前缀，先剥离。
+    先用 extract_command 剥离各种前缀（运行/二级测试/测试命令等），再切分执行。
     """
     import subprocess
-    # 剥离「二级测试：」「二级测试：」等标签前缀，只留可执行命令
-    clean = re.sub(r"^[\s\-*]*二级(?:测试|闸门)?[：:]\s*", "", cmd.strip())
-    clean = clean.lstrip("-* ").strip()
+    clean = extract_command(cmd)
     parts = clean.split()
     if not parts:
         return None, ""
@@ -210,33 +238,62 @@ def parse_pass_fail(text):
 
 
 def update_index(card_id, version, index_path):
-    """同步更新 索引.md 里该卡的状态行：状态→已封版，基线→新版本，并更新时间戳。
+    """同步更新 索引.md 里该卡的状态行：只改「状态」列和「最后变更日」列，绝不碰「基线」列。
 
+    用表头列名精确定位列位置（不是模糊匹配状态词），避免把基线列里
+    「v0（未封版）」的「封版」字样误当状态改掉。
     只改该卡那一个表格行，不删不改其它行（遵守追加区纪律）。
-    找不到该卡行则静默返回 None（不改动索引）。
+    找不到该卡行或表头 → 静默返回 None（不改动索引）。
     """
     if not os.path.isfile(index_path):
         return None
     with open(index_path, encoding="utf-8") as f:
         lines = f.read().splitlines()
+
+    # 1) 先定位表头行，解析「状态」「最后变更日」两列的列下标
+    header_idx = None
+    col_status = col_date = None
+    for i, ln in enumerate(lines):
+        if not ln.strip().startswith("|"):
+            continue
+        cells = split_row(ln)
+        if not cells:
+            continue
+        # 表头特征：含「卡号」列（数据行第一列是 P-xx 卡号，不会是「卡号」二字）
+        if cells[0].strip() in ("卡号", "卡ID", "编号"):
+            header_idx = i
+            for j, c in enumerate(cells):
+                c = c.strip()
+                if c in ("状态", "进度", "state"):
+                    col_status = j
+                elif c in ("最后变更日", "最后变更", "日期", "更新日", "date"):
+                    col_date = j
+            break
+    if header_idx is None or col_status is None:
+        return None  # 找不到表头或没有「状态」列，无法安全定位，宁可不改
+
+    # 2) 找该卡的数据行，按列下标精确改「状态」和「日期」，绝不碰其它列
     stamp = _dt.datetime.now().strftime("%Y-%m-%d")
     changed = False
     for i, ln in enumerate(lines):
-        if card_id not in ln:
+        if i <= header_idx:
+            continue
+        if not ln.strip().startswith("|"):
             continue
         cells = split_row(ln)
-        # 索引行结构：| 卡号 | ... | 状态 | 日期 |（列位置不固定，保守替换该行的「状态」与日期单元格）
+        if not cells or cells[0].strip() != card_id:
+            continue
         new_cells = list(cells)
-        # 把含「在建/待定/封版」状态字的单元格改成「已封版 vX」
-        for j, c in enumerate(new_cells):
-            if re.search(r"在建|待定|封版|已封版|废弃", c):
-                new_cells[j] = "已封版 " + version
-                changed = True
-        # 把日期单元格（形如 2026-11-xx）更新为今天
-        for j, c in enumerate(new_cells):
-            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", c):
-                new_cells[j] = stamp
-                changed = True
+        # 状态列 → 已封版 <version>
+        if col_status < len(new_cells) and new_cells[col_status].strip() != ("已封版 " + version):
+            new_cells[col_status] = "已封版 " + version
+            changed = True
+        # 日期列 → 今天（仅当该列存在且是日期形）
+        if col_date is not None and col_date < len(new_cells):
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", new_cells[col_date].strip()):
+                if new_cells[col_date].strip() != stamp:
+                    new_cells[col_date] = stamp
+                    changed = True
         if changed:
             lines[i] = "| " + " | ".join(new_cells) + " |"
         break
@@ -422,7 +479,8 @@ def main():
     for ln in sec8:
         s = ln.strip()
         if TEST_HINT.search(s) and "待定" not in s and "占位" not in s:
-            hit8 = s.lstrip("-* ").strip()
+            # 存「剥离前缀后的干净命令」，G6 定位目标、G7、归档执行都用它
+            hit8 = extract_command(s.lstrip("-* ").strip())
             break
     for ln in sec10:
         m = WAIVER_RE.match(ln.strip())
