@@ -45,16 +45,22 @@ HEAD_RE = re.compile(r"^## (\d+)\s")
 EMPTY_TALK_RE = re.compile(r"^[\s（(]*(失败|异常|报错|有问题|不正常|表现异常|无|暂无)[\s。）)]*$")
 
 # 二级测试：命令特征 + 豁免声明
-# TEST_HINT 要能识别「运行：python ...」「二级测试：python ...」「测试：pytest ...」等
-# 各种前缀写法，核心是命令里含可执行特征（解释器 + 测试入口 / --test / --selftest / pytest）。
+# TEST_HINT 要能识别「运行：python ...」「二级测试：python ...」「业务测试（二级）：python ...」
+# 等各种前缀写法，核心是命令里含可执行特征（解释器 + 测试入口 / --test / --selftest / pytest）。
 TEST_HINT = re.compile(r"(--selftest\b|--test\b|tests[\\/]+run_tests\.py|\bpytest\b|\bpython\b|\bpython3\b)", re.I)
 WAIVER_RE = re.compile(r"^[-*]?\s*二级闸门(?:豁免)?[：:]\s*(\S.*)$")
 
-# 命令前缀：第 8 段里写在真正命令前的标签，如「运行」「二级测试」「二级闸门」「测试命令」等
+# 命令前缀标签：第 8 段写在真正命令前的各种标签写法。
+# 覆盖：运行 / 二级测试 / 二级闸门 / 业务测试（二级）/ 测试命令 / 测试 / 执行 / 命令 / 跑
+# 前缀可能被 [ ]、【 】、（ ）包裹，如「[二级测试]」「【运行】」；也可能带「（二级）」修饰。
+_CMD_LABEL = r"(?:二级(?:测试|闸门)|业务测试|测试命令|运行命令|运行|执行|命令|测试|跑)"
+# 允许前缀整体被 []【】()（） 包裹，或带可选「（二级）」后缀
 CMD_PREFIX_RE = re.compile(
-    r"^[\s\-*`>]*"
-    r"(?:二级(?:测试|闸门)|测试命令|测试|运行命令|运行|执行|命令|跑)[：:]\s*"
-    r"|^[\s\-*`>]*(?:二级(?:测试|闸门)|测试命令|运行命令|运行|执行)[\s：:]+",
+    r"^[\s\-*`>]*[\[【（(]?\s*" + _CMD_LABEL + r"\s*(?:（[^）)]*）|\([^)]*\)|（二级）|\(二级\))?\s*[\]】）)]?\s*[：:]\s*",
+    re.I)
+# 无冒号形式：标签后直接跟空格再接命令（如「运行 python tests」「二级测试 pytest」）
+CMD_PREFIX_NOSPACE_RE = re.compile(
+    r"^[\s\-*`>]*[\[【（(]?\s*" + _CMD_LABEL + r"\s*(?:（[^）)]*）|\([^)]*\))?\s*[\]】）)]?\s+(?=[A-Za-z0-9_.\\/])",
     re.I)
 
 # G9：首跑红记录格式（总则 4.8 第 3 步）：首跑红 YYYY-MM-DD｜FAIL n｜<测试标识列表>
@@ -69,22 +75,34 @@ PASS_FAIL_OK_RE = re.compile(r"PASS\s+[1-9]\d*\b.*\bFAIL\s+0\b|FAIL\s+0\b.*\bPAS
 def extract_command(raw):
     """从第 8 段的一行里提取真正的可执行命令。
 
-    识别并剥离各种前缀标签（运行 / 二级测试 / 二级闸门 / 测试命令 / 测试 / 执行 等），
-    返回干净的「解释器 + 参数」字符串。剥不掉前缀则原样返回（去首尾空白与列表符号）。
+    识别并剥离各种前缀标签，覆盖卡模板标准写法与各种变体：
+      - 「业务测试（二级，必填）：python tests/run_tests.py」
+      - 「[二级测试] python tests/run_tests.py」「【运行】python tests/run_tests.py」
+      - 「运行：python ...」「二级测试：...」「测试命令：...」「执行 python ...」
+    返回干净的「解释器 + 参数」字符串；剥不掉前缀则原样返回（去首尾空白与列表符号）。
     """
     s = raw.strip().lstrip("-* `>").strip()
-    # 1) 先尝试用前缀正则剥离（「运行：python ...」「二级测试：python ...」）
+    # 1) 冒号形式（「运行：」「[二级测试]：」「业务测试（二级）：」等）
     m = CMD_PREFIX_RE.match(s)
     if m:
-        s = s[m.end():].strip()
-        s = s.lstrip("-* `>").strip()
-    # 2) 若剥完仍以中文标签开头（如「运行 python tests」无冒号），再按常见标签硬切一次
-    for label in ("二级测试", "二级闸门", "测试命令", "运行命令", "运行", "执行"):
-        if s.startswith(label):
-            rest = s[len(label):].lstrip("：: -").strip()
-            if rest:
-                s = rest
-                break
+        s = s[m.end():].strip().lstrip("-* `>").strip()
+    else:
+        # 2) 无冒号形式（「运行 python ...」「二级测试 pytest ...」）
+        m = CMD_PREFIX_NOSPACE_RE.match(s)
+        if m:
+            s = s[m.end():].strip().lstrip("-* `>").strip()
+    # 3) 兜底：若仍以中文标签开头（含方括号/书名号包裹），按常见标签硬切一次
+    if s and not re.match(r"^[A-Za-z0-9_.\\/]", s):
+        for label in ("二级测试", "二级闸门", "业务测试", "测试命令", "运行命令", "运行", "执行", "测试", "命令"):
+            for wrapped in (label, "[%s]" % label, "【%s】" % label, "（%s）" % label, "(%s)" % label):
+                if s.startswith(wrapped):
+                    rest = s[len(wrapped):].lstrip("：: -（(二级)）").strip()
+                    if rest and re.match(r"^[A-Za-z0-9_.\\/]", rest):
+                        s = rest
+                        break
+            else:
+                continue
+            break
     return s
 
 
@@ -264,9 +282,10 @@ def update_index(card_id, version, index_path):
             header_idx = i
             for j, c in enumerate(cells):
                 c = c.strip()
-                if c in ("状态", "进度", "state"):
+                # 铁律（红队三审）：只认精确汉字列名「状态」和「最后变更日」，多一个别名都不行。
+                if c == "状态":
                     col_status = j
-                elif c in ("最后变更日", "最后变更", "日期", "更新日", "date"):
+                elif c == "最后变更日":
                     col_date = j
             break
     if header_idx is None or col_status is None:
@@ -305,6 +324,34 @@ def update_index(card_id, version, index_path):
 
 def is_placeholder(v):
     return (not v) or any(p in v for p in PLACEHOLDER)
+
+
+def pick_test_command(sec8):
+    """从第 8 段多行里挑出二级测试命令。
+
+    优先挑「带二级/业务测试标签」的行（如「业务测试（二级）：」「二级测试：」），
+    找不到带标签的才回退到任何含可执行特征的行。返回 (干净命令, 是否带二级标签)。
+
+    注意：只有「二级测试 / 业务测试」这类明确指二级测试的标签才算「带标签」；
+    「运行 / 执行」是通用词，不算二级测试标签（否则会把「运行：python setup.py」误当测试）。
+    """
+    candidates = []  # (命令, 是否明确二级标签)
+    for ln in sec8:
+        s = ln.strip()
+        if "待定" in s or "占位" in s:
+            continue
+        if not TEST_HINT.search(s):
+            continue
+        # 明确二级标签：含「二级测试」或「业务测试」，或「测试命令」
+        is_2nd = bool(re.search(r"二级测试|业务测试|测试命令|二级闸门", s))
+        candidates.append((extract_command(s.lstrip("-* ").strip()), is_2nd))
+    if not candidates:
+        return None, False
+    # 优先明确二级标签的行
+    for cmd, is_2nd in candidates:
+        if is_2nd:
+            return cmd, True
+    return candidates[0][0], False
 
 
 def sections(lines):
@@ -471,17 +518,14 @@ def main():
         except json.JSONDecodeError as e:
             results.append(("G5", False, "台账 JSON 解析失败：%s" % e))
 
-    # G6：二级测试命令写了没有 + 声明的目标是否真实存在（不执行命令）
+    # G6：二级测试命令写了没有 + 声明的目标是否真实存在 + 执行结果是否真通过
     sec8 = sec.get(8, (0, []))[1]
     sec10 = sec.get(10, (0, []))[1]
     base = os.path.dirname(os.path.abspath(card))
-    hit8, waiver = None, None
-    for ln in sec8:
-        s = ln.strip()
-        if TEST_HINT.search(s) and "待定" not in s and "占位" not in s:
-            # 存「剥离前缀后的干净命令」，G6 定位目标、G7、归档执行都用它
-            hit8 = extract_command(s.lstrip("-* ").strip())
-            break
+    # 优先带「二级/业务测试」标签的行，找不到才抓别的（第 8 段多行时不再只抓第一行）
+    hit8, hit8_tagged = pick_test_command(sec8)
+    g_pn = g_fn = None   # G6 真执行拿到的 PASS/FAIL 数字，归档段复用
+    waiver = None
     for ln in sec10:
         m = WAIVER_RE.match(ln.strip())
         if m:
@@ -498,13 +542,35 @@ def main():
                 "（请写明 tests/run_tests.py、被测 .py 或 tests 目录）" % hit8[:60]))
         else:
             p = target_path(base, tgt)
-            if os.path.exists(p):
-                tgt_path = p
-                results.append(("G6", True, "命令组含二级测试：%s；目标存在：%s" % (hit8[:40], tgt)))
-            else:
+            if not os.path.exists(p):
                 results.append(("G6", False,
                     "伪造测试：第 8 段写的 %s 不存在（解析为 %s）。新卡无豁免权——"
                     "先建测试文件，或删掉该行改走 4.4 豁免（仅限确无业务测试的项目）" % (tgt, p)))
+            else:
+                tgt_path = p
+                # 铁律（红队三审）：G6 不只查文件存在，还要真正执行二级测试；
+                # 退出码非 0 或抓不到 PASS/FAIL 数字 → 判红，不许封版。
+                rc, out = run_secondary_test(hit8, base)
+                pn, fn = parse_pass_fail(out)
+                if rc is None:
+                    results.append(("G6", False, "二级测试执行失败：%s" % out[:80]))
+                elif rc != 0:
+                    results.append(("G6", False,
+                        "二级测试退出码 %d（非 0），测试真 FAIL，禁止封版。输出尾部：%s" %
+                        (rc, out.strip().splitlines()[-1][:80] if out.strip() else "(空)")))
+                elif pn is None or fn is None:
+                    results.append(("G6", False,
+                        "二级测试退出码 0，但输出未见 PASS/FAIL 数字（无法证明真跑过）。"
+                        "须输出 `PASS n`(n≥1) / `FAIL 0`。输出尾部：%s" %
+                        (out.strip().splitlines()[-1][:80] if out.strip() else "(空)")))
+                elif fn != 0 or pn < 1:
+                    results.append(("G6", False,
+                        "二级测试数字不合规：PASS %s / FAIL %s，须 PASS n(n≥1) 且 FAIL 0。" % (pn, fn)))
+                else:
+                    g_pn, g_fn = pn, fn
+                    results.append(("G6", True,
+                        "命令组含二级测试：%s；目标存在；真执行 PASS %s / FAIL %s（退出码 0）" %
+                        (hit8[:40], pn, fn)))
     elif waiver_ok:
         results.append(("G6", True, "已声明二级闸门不适用：%s" % waiver[:48]))
     else:
@@ -601,29 +667,21 @@ def main():
     verdict = "通过" if passed == len(results) else "不通过"
     print("结论：%s（%d/%d）" % (verdict, passed, len(results)))
 
-    # 封版归档：全绿且带 --seal 时，实际执行二级测试拿真实数字，写归档摘要 + 同步索引
+    # 封版归档：全绿且带 --seal 时，复用 G6 已执行的真实测试结果，写归档摘要 + 同步索引
     if verdict == "通过" and seal_ver is not None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        # 1) 真实执行二级测试命令（hit8 已在 G6 解析过），回填 PASS/FAIL 数字
+        # 1) G6 已真执行二级测试并验证退出码 0 + PASS/FAIL 合规，这里直接复用真实数字
         test_summary = None
-        if hit8:
-            rc, out = run_secondary_test(hit8, base)
-            pn, fn = parse_pass_fail(out)
-            if pn is not None or fn is not None:
-                test_summary = "`%s` → 退出码 %s，PASS %s / FAIL %s（%s）" % (
-                    hit8[:48], rc if rc is not None else "?",
-                    pn if pn is not None else 0,
-                    fn if fn is not None else 0,
-                    _dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
-            else:
-                test_summary = "`%s` → 退出码 %s（输出未见 PASS/FAIL 数字，见回执）" % (
-                    hit8[:48], rc if rc is not None else "?")
+        if hit8 and g_pn is not None and g_fn is not None:
+            test_summary = "`%s` → 退出码 0，PASS %s / FAIL %s（%s）" % (
+                hit8[:48], g_pn, g_fn,
+                _dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
         # 2) 回填验收口径（第 9 段真实行）
         acc_rows = table_rows(sec.get(9, (0, []))[1])
         ap = seal_archive(card_id, seal_ver, base_dir, test_summary=test_summary,
                           acc_rows=acc_rows)
         print("归档：已生成 %s" % ap)
-        # 3) 同步索引（状态→已封版 vX，基线日期→今天）
+        # 3) 同步索引（状态→已封版 vX，最后变更日→今天）
         index_path = os.path.join(base_dir, "索引.md")
         ip = update_index(card_id, seal_ver, index_path)
         if ip:
