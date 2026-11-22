@@ -51,16 +51,23 @@ TEST_HINT = re.compile(r"(--selftest\b|--test\b|tests[\\/]+run_tests\.py|\bpytes
 WAIVER_RE = re.compile(r"^[-*]?\s*二级闸门(?:豁免)?[：:]\s*(\S.*)$")
 
 # 命令前缀标签：第 8 段写在真正命令前的各种标签写法。
-# 覆盖：运行 / 二级测试 / 二级闸门 / 业务测试（二级）/ 测试命令 / 测试 / 执行 / 命令 / 跑
-# 前缀可能被 [ ]、【 】、（ ）包裹，如「[二级测试]」「【运行】」；也可能带「（二级）」修饰。
-_CMD_LABEL = r"(?:二级(?:测试|闸门)|业务测试|测试命令|运行命令|运行|执行|命令|测试|跑)"
-# 允许前缀整体被 []【】()（） 包裹，或带可选「（二级）」后缀
+# 覆盖中文：运行 / 二级测试 / 二级闸门 / 业务测试（二级）/ 测试命令 / 测试 / 执行 / 命令 / 跑
+#       英文：run / test / exec / execute
+# 前缀可能被 [ ]、【 】、（ ）包裹，如「[二级测试]」「【运行】」；也可能带「（二级）」修饰；
+# 行首可能是列表符号「- * 1) 1. ①」等序号。用 | 拼接成一个大标签分支。
+_CMD_LABEL = (r"(?:二级(?:测试|闸门)|业务测试|测试命令|运行命令|运行|执行|命令|测试|跑"
+              r"|说明|备注|run|test|exec|execute)")
+# 行首杂项：空白 + 列表符(- * > ·) + 可选序号(1) 1. ① 一、) + 可选的 []【】（）() 包裹
+_LINE_PRE = (r"^[\s\-*`>·]*"
+             r"(?:\(\d+\)|（\d+）|\d+[\.、)]|[①②③④⑤⑥⑦⑧⑨⑩]|[一二三四五六七八九十]+[、.])?\s*"
+             r"[\[【（(]?\s*")
+# 冒号形式：「运行：」「[二级测试]：」「业务测试（二级）：」「RUN:」等
 CMD_PREFIX_RE = re.compile(
-    r"^[\s\-*`>]*[\[【（(]?\s*" + _CMD_LABEL + r"\s*(?:（[^）)]*）|\([^)]*\)|（二级）|\(二级\))?\s*[\]】）)]?\s*[：:]\s*",
+    _LINE_PRE + _CMD_LABEL + r"\s*(?:（[^）)]*）|\([^)]*\))?\s*[\]】）)]?\s*[：:]\s*",
     re.I)
-# 无冒号形式：标签后直接跟空格再接命令（如「运行 python tests」「二级测试 pytest」）
+# 无冒号形式：标签后直接跟空格再接命令（如「运行 python tests」「二级测试 pytest」「RUN python」）
 CMD_PREFIX_NOSPACE_RE = re.compile(
-    r"^[\s\-*`>]*[\[【（(]?\s*" + _CMD_LABEL + r"\s*(?:（[^）)]*）|\([^)]*\))?\s*[\]】）)]?\s+(?=[A-Za-z0-9_.\\/])",
+    _LINE_PRE + _CMD_LABEL + r"\s*(?:（[^）)]*）|\([^)]*\))?\s*[\]】）)]?\s+(?=[A-Za-z0-9_.\\/])",
     re.I)
 
 # G9：首跑红记录格式（总则 4.8 第 3 步）：首跑红 YYYY-MM-DD｜FAIL n｜<测试标识列表>
@@ -79,23 +86,31 @@ def extract_command(raw):
       - 「业务测试（二级，必填）：python tests/run_tests.py」
       - 「[二级测试] python tests/run_tests.py」「【运行】python tests/run_tests.py」
       - 「运行：python ...」「二级测试：...」「测试命令：...」「执行 python ...」
+      - 「1) 运行：python ...」「RUN: python ...」「说明：运行：python ...」（两级前缀）
     返回干净的「解释器 + 参数」字符串；剥不掉前缀则原样返回（去首尾空白与列表符号）。
+
+    采用循环剥离：一次剥一层，最多剥 5 层，能吃掉「说明：运行：python」这种嵌套前缀。
     """
-    s = raw.strip().lstrip("-* `>").strip()
-    # 1) 冒号形式（「运行：」「[二级测试]：」「业务测试（二级）：」等）
-    m = CMD_PREFIX_RE.match(s)
-    if m:
-        s = s[m.end():].strip().lstrip("-* `>").strip()
-    else:
-        # 2) 无冒号形式（「运行 python ...」「二级测试 pytest ...」）
+    s = raw.strip().lstrip("-* `>·").strip()
+    for _ in range(5):
+        # 1) 冒号形式（「运行：」「[二级测试]：」「业务测试（二级）：」「RUN:」）
+        m = CMD_PREFIX_RE.match(s)
+        if m:
+            s = s[m.end():].strip().lstrip("-* `>·").strip()
+            continue
+        # 2) 无冒号形式（「运行 python ...」「二级测试 pytest ...」「RUN python」）
         m = CMD_PREFIX_NOSPACE_RE.match(s)
         if m:
-            s = s[m.end():].strip().lstrip("-* `>").strip()
-    # 3) 兜底：若仍以中文标签开头（含方括号/书名号包裹），按常见标签硬切一次
+            s = s[m.end():].strip().lstrip("-* `>·").strip()
+            continue
+        break
+    # 3) 兜底：若仍以中文/英文标签开头（含方括号/书名号包裹），按常见标签硬切一次
+    labels = ("二级测试", "二级闸门", "业务测试", "测试命令", "运行命令", "运行", "执行", "测试",
+              "命令", "run", "test", "exec", "execute")
     if s and not re.match(r"^[A-Za-z0-9_.\\/]", s):
-        for label in ("二级测试", "二级闸门", "业务测试", "测试命令", "运行命令", "运行", "执行", "测试", "命令"):
+        for label in labels:
             for wrapped in (label, "[%s]" % label, "【%s】" % label, "（%s）" % label, "(%s)" % label):
-                if s.startswith(wrapped):
+                if s.lower().startswith(wrapped.lower()):
                     rest = s[len(wrapped):].lstrip("：: -（(二级)）").strip()
                     if rest and re.match(r"^[A-Za-z0-9_.\\/]", rest):
                         s = rest
@@ -258,68 +273,93 @@ def parse_pass_fail(text):
 def update_index(card_id, version, index_path):
     """同步更新 索引.md 里该卡的状态行：只改「状态」列和「最后变更日」列，绝不碰「基线」列。
 
-    用表头列名精确定位列位置（不是模糊匹配状态词），避免把基线列里
-    「v0（未封版）」的「封版」字样误当状态改掉。
-    只改该卡那一个表格行，不删不改其它行（遵守追加区纪律）。
-    找不到该卡行或表头 → 静默返回 None（不改动索引）。
+    返回 (status, message) 元组：
+      - ("ok", ...)        成功更新
+      - ("not_found", ...) 找不到该卡（或索引.md 不存在、无合法表），未做任何改动
+      - ("abnormal", ...)  索引结构异常（多张表 / 同卡号多行），拒绝写入
+
+    安全铁律（红队终审）：
+      1. 必须精确定位到「唯一一张」同时含「卡号」「状态」「最后变更日」三个精确
+         汉字列名的表；有第二张候选表 → 判结构异常，绝不瞎猜。
+      2. 目标卡号在数据行里必须且只能出现一次；出现 0 次 → not_found，出现 ≥2 次
+         → 结构异常，拒绝更新。
+      3. 只改「状态」「最后变更日」两列，其余列（尤其基线列）一字不动。
     """
     if not os.path.isfile(index_path):
-        return None
+        return ("not_found", "索引.md 不存在")
     with open(index_path, encoding="utf-8") as f:
         lines = f.read().splitlines()
 
-    # 1) 先定位表头行，解析「状态」「最后变更日」两列的列下标
-    header_idx = None
-    col_status = col_date = None
+    # 1) 先扫描所有「卡号」表头行（首格精确等于「卡号」）。
+    #    红队判据：出现 ≥2 个「卡号」表头 = 结构歧义，直接拒绝，不做「挑一张真表」的猜测。
+    card_headers = []
     for i, ln in enumerate(lines):
         if not ln.strip().startswith("|"):
             continue
         cells = split_row(ln)
         if not cells:
             continue
-        # 表头特征：含「卡号」列（数据行第一列是 P-xx 卡号，不会是「卡号」二字）
-        if cells[0].strip() in ("卡号", "卡ID", "编号"):
-            header_idx = i
-            for j, c in enumerate(cells):
-                c = c.strip()
-                # 铁律（红队三审）：只认精确汉字列名「状态」和「最后变更日」，多一个别名都不行。
-                if c == "状态":
-                    col_status = j
-                elif c == "最后变更日":
-                    col_date = j
-            break
-    if header_idx is None or col_status is None:
-        return None  # 找不到表头或没有「状态」列，无法安全定位，宁可不改
+        if cells[0].strip() == "卡号":
+            card_headers.append(i)
 
-    # 2) 找该卡的数据行，按列下标精确改「状态」和「日期」，绝不碰其它列
-    stamp = _dt.datetime.now().strftime("%Y-%m-%d")
-    changed = False
+    if len(card_headers) == 0:
+        return ("not_found", "索引中无「卡号」表头")
+    if len(card_headers) > 1:
+        return ("abnormal", "索引存在 %d 张「卡号」表头，结构歧义，拒绝更新" % len(card_headers))
+
+    # 2) 唯一表头：必须同时含精确列名「状态」和「最后变更日」，否则无法安全定位。
+    header_idx = card_headers[0]
+    cells = split_row(lines[header_idx])
+    col_status = col_date = None
+    for j, c in enumerate(cells):
+        c = c.strip()
+        if c == "状态":
+            col_status = j
+        elif c == "最后变更日":
+            col_date = j
+    if col_status is None or col_date is None:
+        return ("not_found",
+                "唯一表头缺「状态」或「最后变更日」列（现有列：%s），无法安全定位，拒绝更新"
+                % "、".join(c.strip() for c in cells))
+
+    # 3) 找目标卡号的数据行，必须唯一（≥2 行 = 结构异常）
+    target_rows = []
     for i, ln in enumerate(lines):
         if i <= header_idx:
             continue
         if not ln.strip().startswith("|"):
             continue
         cells = split_row(ln)
-        if not cells or cells[0].strip() != card_id:
+        if not cells:
             continue
-        new_cells = list(cells)
-        # 状态列 → 已封版 <version>
-        if col_status < len(new_cells) and new_cells[col_status].strip() != ("已封版 " + version):
-            new_cells[col_status] = "已封版 " + version
-            changed = True
-        # 日期列 → 今天（仅当该列存在且是日期形）
-        if col_date is not None and col_date < len(new_cells):
-            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", new_cells[col_date].strip()):
-                if new_cells[col_date].strip() != stamp:
-                    new_cells[col_date] = stamp
-                    changed = True
-        if changed:
-            lines[i] = "| " + " | ".join(new_cells) + " |"
-        break
+        if cells[0].strip() == card_id:
+            target_rows.append((i, cells))
+
+    if len(target_rows) == 0:
+        return ("not_found", "索引中无卡号 %s 的数据行" % card_id)
+    if len(target_rows) > 1:
+        return ("abnormal", "卡号 %s 在索引中出现 %d 行，结构异常，拒绝更新" % (card_id, len(target_rows)))
+
+    i, cells = target_rows[0]
+    stamp = _dt.datetime.now().strftime("%Y-%m-%d")
+    new_cells = list(cells)
+    changed = False
+    # 状态列 → 已封版 <version>（只此一列）
+    if col_status < len(new_cells) and new_cells[col_status].strip() != ("已封版 " + version):
+        new_cells[col_status] = "已封版 " + version
+        changed = True
+    # 最后变更日列 → 今天（仅当该列值是日期形，避免污染非日期内容）
+    if col_date < len(new_cells):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", new_cells[col_date].strip()):
+            if new_cells[col_date].strip() != stamp:
+                new_cells[col_date] = stamp
+                changed = True
     if changed:
+        lines[i] = "| " + " | ".join(new_cells) + " |"
         with open(index_path, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(lines) + "\n")
-    return index_path if changed else None
+        return ("ok", "已更新 %s 的封版状态与最后变更日" % card_id)
+    return ("ok", "卡号 %s 状态已是「已封版 %s」，无需改动" % (card_id, version))
 
 
 def is_placeholder(v):
@@ -683,11 +723,14 @@ def main():
         print("归档：已生成 %s" % ap)
         # 3) 同步索引（状态→已封版 vX，最后变更日→今天）
         index_path = os.path.join(base_dir, "索引.md")
-        ip = update_index(card_id, seal_ver, index_path)
-        if ip:
-            print("索引：已更新 %s 的封版状态" % card_id)
-        else:
-            print("索引：未找到 %s 对应行（或索引.md 不存在），跳过" % card_id)
+        istatus, imsg = update_index(card_id, seal_ver, index_path)
+        if istatus == "ok":
+            print("索引：%s" % imsg)
+        elif istatus == "not_found":
+            print("索引：未找到 %s 对应行（%s），跳过" % (card_id, imsg))
+        else:  # abnormal：结构异常，判红报错，绝不谎报已更新
+            print("索引：结构异常，拒绝更新——%s" % imsg)
+            return 1
 
     return 0 if verdict == "通过" else 1
 
