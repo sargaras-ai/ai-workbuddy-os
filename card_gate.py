@@ -15,6 +15,8 @@
         必须真实存在；或第 10 段声明豁免/历史卡。写了不存在的路径＝伪造测试，判红。
     G7  验收↔测试映射：第 9 段每行第 5 列须写测试标识，一条对一个、不许重复，
         且该标识要能在 G6 定位到的测试文件里逐字找到；豁免/历史卡可不填。
+    G9  强制测试驱动：写了二级测试命令（非豁免）的项目，台账 decisions 里必须
+        有一条「首跑红」记录（证明测试曾经失败过、能发现错误）。没有 → 判红。
 
 退出码: 0 全通过 / 1 有不通过项 / 2 无法检测（文件缺失等）
 
@@ -23,11 +25,14 @@
     G6 只校验测试目标文件是否存在，不执行命令、不校验解释器——能不能跑通由封版流程负责。
     G6 解析的是命令里的字面路径，相对卡所在目录；用变量拼出来的路径它看不懂，会判「定位不到」。
     G7 只判「名字对得上」，判不出那条测试是否真的在验这条验收——断言写得对不对仍要人看。
+    G9 只判「decisions 里有没有首跑红记录」，不执行测试、不判那条记录是真是假——
+        记录本身是真是假仍要人看（和 G7 同一层局限）。
 """
 import json
 import os
 import re
 import sys
+import datetime as _dt
 
 PLACEHOLDER = ("待定",)
 G3_WORDS = ("按需", "灵活", "通常", "一般", "适当")
@@ -104,6 +109,45 @@ def split_row(line):
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
+def seal_archive(card_id, version, base_dir):
+    """封版通过后写归档摘要到 <base_dir>/_归档/YYYYMMDD-vX.md。
+
+    base_dir 用脚本所在目录动态定位（不用盘符硬编码，正本与 clone 都能跑）。
+    归档只记录「旧版指标」，作为回滚对比的基准；不覆盖已有同名文件（同日重复封版按序号递增）。
+    """
+    archive_dir = os.path.join(base_dir, "_归档")
+    os.makedirs(archive_dir, exist_ok=True)
+    stamp = _dt.datetime.now()
+    date = stamp.strftime("%Y%m%d")
+    # 同日多次封版：vX 序号递增，找当天已存在的最大序号 +1
+    import glob
+    existing = glob.glob(os.path.join(archive_dir, f"{date}-*.md"))
+    seq = 1
+    if existing:
+        nums = []
+        for p in existing:
+            m = re.search(r"-v(\d+)\.md$", os.path.basename(p))
+            if m:
+                nums.append(int(m.group(1)))
+        seq = max(nums) + 1 if nums else 1
+    # 版本号优先用调用方给的，否则用序号 vN
+    ver = version if version else f"v{seq}"
+    fname = f"{date}-{ver}.md"
+    path = os.path.join(archive_dir, fname)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"# 封版归档 {card_id} · {ver}\n\n")
+        f.write(f"- 封版时间：{stamp.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"- 卡号：{card_id}\n")
+        f.write(f"- 版本号：{ver}\n")
+        f.write(f"- 归档目的：记录旧版指标，作为回滚对比基准（只读）\n\n")
+        f.write("## 旧版指标\n\n")
+        f.write("- 可用功能：见项目卡第 6 段「验收」表（封版时逐条记录）\n")
+        f.write("- 验收口径：见项目卡第 9 段「验收」表\n")
+        f.write("- 二级测试：见封版回执 `PASS n / FAIL 0` 数字（本文件生成时未回填，须由封版动作补齐）\n\n")
+        f.write("> 本文件由 `card_gate.py --seal` 生成。索引同步由封版动作另行更新。\n")
+    return path
+
+
 def is_placeholder(v):
     return (not v) or any(p in v for p in PLACEHOLDER)
 
@@ -135,12 +179,17 @@ def table_rows(block):
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python card_gate.py <项目卡.md> [--ledger <_台账.json>]")
+        print("用法: python card_gate.py <项目卡.md> [--ledger <_台账.json>] [--seal <版本号>]")
         return 2
     card = sys.argv[1]
     ledger_path = None
+    seal_ver = None
     if "--ledger" in sys.argv:
         ledger_path = sys.argv[sys.argv.index("--ledger") + 1]
+    if "--seal" in sys.argv:
+        i = sys.argv.index("--seal")
+        if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("--"):
+            seal_ver = sys.argv[i + 1]
     if not os.path.isfile(card):
         print("无法检测：卡文件不存在 -> %s" % card)
         return 2
@@ -339,6 +388,31 @@ def main():
     else:
         results.append(("G7", True, "已豁免/历史卡，不填映射（验收 %d 条）" % len(acc9)))
 
+    # G9：强制测试驱动 —— 写了二级测试命令（非豁免）的项目，台账 decisions 必须有「首跑红」记录。
+    # 只查「有没有这条记录」，不查记录真假（与 G7 同一层局限）。豁免/历史卡（走 4.4）不强制。
+    if hit8 and not waiver_ok:
+        if not os.path.isfile(ledger_path):
+            results.append(("G9", False, "台账缺失，无法核验首跑红记录 -> %s" % ledger_path))
+        else:
+            try:
+                with open(ledger_path, encoding="utf-8") as f:
+                    led9 = json.load(f)
+                decisions = led9.get("decisions", [])
+                first_red = [d for d in decisions
+                             if isinstance(d, str) and "首跑红" in d]
+                if first_red:
+                    results.append(("G9", True, "台账 decisions 有首跑红记录（%d 条）" % len(first_red)))
+                else:
+                    results.append(("G9", False,
+                        "写了二级测试命令（非豁免），但台账 decisions 里没有「首跑红」记录。"
+                        "总则 4.8：任何涉及逻辑的业务代码修改，必须先写测试、跑红（FAIL n 且退出码非 0）、"
+                        "留证于 decisions，才许写业务代码。缺这条记录，封版判红。" ))
+            except json.JSONDecodeError as e:
+                results.append(("G9", False, "台账 JSON 解析失败：%s" % e))
+    else:
+        # 豁免/历史卡，或根本没写二级测试命令（G6 已判红），G9 不重复卡
+        results.append(("G9", True, "豁免/历史卡，或未写二级测试命令，不强制首跑红"))
+
     # 输出
     card_id = status.group(1) if status else os.path.basename(card)
     print("card_gate｜%s" % card_id)
@@ -347,6 +421,13 @@ def main():
     passed = sum(1 for _, ok, _ in results if ok)
     verdict = "通过" if passed == len(results) else "不通过"
     print("结论：%s（%d/%d）" % (verdict, passed, len(results)))
+
+    # 封版归档：全绿且带 --seal 时，写归档摘要（只读基准）
+    if verdict == "通过" and seal_ver is not None:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        ap = seal_archive(card_id, seal_ver, base_dir)
+        print("归档：已生成 %s" % ap)
+
     return 0 if verdict == "通过" else 1
 
 
