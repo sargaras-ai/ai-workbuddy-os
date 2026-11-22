@@ -15,8 +15,11 @@
         必须真实存在；或第 10 段声明豁免/历史卡。写了不存在的路径＝伪造测试，判红。
     G7  验收↔测试映射：第 9 段每行第 5 列须写测试标识，一条对一个、不许重复，
         且该标识要能在 G6 定位到的测试文件里逐字找到；豁免/历史卡可不填。
-    G9  强制测试驱动：写了二级测试命令（非豁免）的项目，台账 decisions 里必须
-        有一条「首跑红」记录（证明测试曾经失败过、能发现错误）。没有 → 判红。
+    G9  强制测试驱动：写了二级测试命令的项目，台账 decisions 里必须有一条
+        格式合规的「首跑红 YYYY-MM-DD｜FAIL n｜<测试标识>」记录（总则 4.8）。
+        缺、或格式不合规（假日期 / 无 FAIL n / 无测试标识）→ 判红。
+        写了测试命令就不许豁免（总则 4.4：豁免前提是「本来没有」，不是「写了但没做」）。
+        同时校验 decisions 里声明 verified 的修 bug 记录必须附测试输出证据（PASS n 且 FAIL 0）。
 
 退出码: 0 全通过 / 1 有不通过项 / 2 无法检测（文件缺失等）
 
@@ -25,8 +28,9 @@
     G6 只校验测试目标文件是否存在，不执行命令、不校验解释器——能不能跑通由封版流程负责。
     G6 解析的是命令里的字面路径，相对卡所在目录；用变量拼出来的路径它看不懂，会判「定位不到」。
     G7 只判「名字对得上」，判不出那条测试是否真的在验这条验收——断言写得对不对仍要人看。
-    G9 只判「decisions 里有没有首跑红记录」，不执行测试、不判那条记录是真是假——
-        记录本身是真是假仍要人看（和 G7 同一层局限）。
+    G9 判「首跑红记录格式是否合规」（日期/FAIL n/测试标识三要素齐全），并判 verified
+        声明是否附测试证据；但不执行测试、不判证据的 PASS/FAIL 数字本身是真是假——
+        数字真假仍要人看（和 G7 同一层局限）。
 """
 import json
 import os
@@ -43,6 +47,14 @@ EMPTY_TALK_RE = re.compile(r"^[\s（(]*(失败|异常|报错|有问题|不正常
 # 二级测试：命令特征 + 豁免声明
 TEST_HINT = re.compile(r"(--selftest\b|--test\b|tests[\\/]+run_tests\.py)", re.I)
 WAIVER_RE = re.compile(r"^[-*]?\s*二级闸门(?:豁免)?[：:]\s*(\S.*)$")
+
+# G9：首跑红记录格式（总则 4.8 第 3 步）：首跑红 YYYY-MM-DD｜FAIL n｜<测试标识列表>
+# 必须带具体日期（YYYY-MM-DD）、FAIL n（n≥1）、以及至少一个非空测试标识。
+FIRST_RED_RE = re.compile(r"首跑红\s+(\d{4}-\d{2}-\d{2})\s*[｜|]\s*FAIL\s+([1-9]\d*)\s*[｜|]\s*(\S+)")
+
+# G9：verified 证据 —— 修 bug 声明 verified 必须附「PASS n 且 FAIL 0」（总则 4.11）。
+VERIFIED_EVIDENCE_RE = re.compile(r"verified", re.I)
+PASS_FAIL_OK_RE = re.compile(r"PASS\s+[1-9]\d*\b.*\bFAIL\s+0\b|FAIL\s+0\b.*\bPASS\s+[1-9]\d*\b")
 
 
 def find_test_target(cmd):
@@ -109,11 +121,14 @@ def split_row(line):
     return [c.strip() for c in line.strip().strip("|").split("|")]
 
 
-def seal_archive(card_id, version, base_dir):
+def seal_archive(card_id, version, base_dir, test_summary=None, acc_rows=None):
     """封版通过后写归档摘要到 <base_dir>/_归档/YYYYMMDD-vX.md。
 
     base_dir 用脚本所在目录动态定位（不用盘符硬编码，正本与 clone 都能跑）。
     归档只记录「旧版指标」，作为回滚对比的基准；不覆盖已有同名文件（同日重复封版按序号递增）。
+
+    test_summary: 二级测试的真实回执字符串（如「PASS 3 / FAIL 0」，实际执行所得，非占位）。
+    acc_rows: 第 9 段验收表的真实行（逐条回填可用功能/验收口径，非「见项目卡」空话）。
     """
     archive_dir = os.path.join(base_dir, "_归档")
     os.makedirs(archive_dir, exist_ok=True)
@@ -141,11 +156,94 @@ def seal_archive(card_id, version, base_dir):
         f.write(f"- 版本号：{ver}\n")
         f.write(f"- 归档目的：记录旧版指标，作为回滚对比基准（只读）\n\n")
         f.write("## 旧版指标\n\n")
-        f.write("- 可用功能：见项目卡第 6 段「验收」表（封版时逐条记录）\n")
-        f.write("- 验收口径：见项目卡第 9 段「验收」表\n")
-        f.write("- 二级测试：见封版回执 `PASS n / FAIL 0` 数字（本文件生成时未回填，须由封版动作补齐）\n\n")
+        if acc_rows:
+            f.write("### 验收口径（第 9 段逐条）\n\n")
+            for i, cells in enumerate(acc_rows, 1):
+                # 第 9 段列序：编号 | 动作 | 期望结果 | 失败表现 | 测试标识
+                action = cells[1] if len(cells) > 1 else ""
+                expect = cells[2] if len(cells) > 2 else ""
+                f.write("- %d. %s → 期望 %s\n" % (i, action, expect))
+            f.write("\n")
+        else:
+            f.write("- 验收口径：见项目卡第 9 段「验收」表\n\n")
+        if test_summary:
+            f.write(f"### 二级测试（真实回执）\n\n- {test_summary}\n\n")
+        else:
+            f.write("- 二级测试：未执行（本次封版未跑二级命令）\n\n")
         f.write("> 本文件由 `card_gate.py --seal` 生成。索引同步由封版动作另行更新。\n")
     return path
+
+
+def run_secondary_test(cmd, base):
+    """实际执行第 8 段的二级测试命令，返回 (exit_code, 输出全文)。
+
+    从输出里抓 PASS/FAIL 数字。命令相对卡所在目录（base）执行。
+    解释器用「全路径」：优先按命令里的解释器字面执行（如 python / pytest）。
+    命令可能带「二级测试：」这类标签前缀，先剥离。
+    """
+    import subprocess
+    # 剥离「二级测试：」「二级测试：」等标签前缀，只留可执行命令
+    clean = re.sub(r"^[\s\-*]*二级(?:测试|闸门)?[：:]\s*", "", cmd.strip())
+    clean = clean.lstrip("-* ").strip()
+    parts = clean.split()
+    if not parts:
+        return None, ""
+    try:
+        p = subprocess.run(parts, cwd=base, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=120)
+        out = (p.stdout or "") + (p.stderr or "")
+        return p.returncode, out
+    except FileNotFoundError:
+        return None, "解释器不存在：%s" % parts[0]
+    except subprocess.TimeoutExpired:
+        return None, "二级测试执行超时（>120s）"
+    except OSError as e:
+        return None, "二级测试执行失败：%s" % e
+
+
+def parse_pass_fail(text):
+    """从测试输出里解析 PASS n / FAIL m 数字。找不到返回 (None, None)。"""
+    p = re.search(r"\bPASS\s+(\d+)\b", text, re.I)
+    f = re.search(r"\bFAIL\s+(\d+)\b", text, re.I)
+    return (int(p.group(1)) if p else None,
+            int(f.group(1)) if f else None)
+
+
+def update_index(card_id, version, index_path):
+    """同步更新 索引.md 里该卡的状态行：状态→已封版，基线→新版本，并更新时间戳。
+
+    只改该卡那一个表格行，不删不改其它行（遵守追加区纪律）。
+    找不到该卡行则静默返回 None（不改动索引）。
+    """
+    if not os.path.isfile(index_path):
+        return None
+    with open(index_path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    stamp = _dt.datetime.now().strftime("%Y-%m-%d")
+    changed = False
+    for i, ln in enumerate(lines):
+        if card_id not in ln:
+            continue
+        cells = split_row(ln)
+        # 索引行结构：| 卡号 | ... | 状态 | 日期 |（列位置不固定，保守替换该行的「状态」与日期单元格）
+        new_cells = list(cells)
+        # 把含「在建/待定/封版」状态字的单元格改成「已封版 vX」
+        for j, c in enumerate(new_cells):
+            if re.search(r"在建|待定|封版|已封版|废弃", c):
+                new_cells[j] = "已封版 " + version
+                changed = True
+        # 把日期单元格（形如 2026-11-xx）更新为今天
+        for j, c in enumerate(new_cells):
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", c):
+                new_cells[j] = stamp
+                changed = True
+        if changed:
+            lines[i] = "| " + " | ".join(new_cells) + " |"
+        break
+    if changed:
+        with open(index_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+    return index_path if changed else None
 
 
 def is_placeholder(v):
@@ -388,30 +486,53 @@ def main():
     else:
         results.append(("G7", True, "已豁免/历史卡，不填映射（验收 %d 条）" % len(acc9)))
 
-    # G9：强制测试驱动 —— 写了二级测试命令（非豁免）的项目，台账 decisions 必须有「首跑红」记录。
-    # 只查「有没有这条记录」，不查记录真假（与 G7 同一层局限）。豁免/历史卡（走 4.4）不强制。
-    if hit8 and not waiver_ok:
+    # G9：强制测试驱动 —— 写了二级测试命令的项目，台账 decisions 必须有一条格式合规的
+    # 「首跑红 YYYY-MM-DD｜FAIL n｜<测试标识>」记录（正则校验，不是子串匹配）。
+    # 写了测试命令就不许豁免（总则 4.4：豁免前提是「本来没有」）。
+    # 同时校验 decisions 里声明 verified 的修 bug 记录必须附测试输出证据。
+    if hit8:
         if not os.path.isfile(ledger_path):
             results.append(("G9", False, "台账缺失，无法核验首跑红记录 -> %s" % ledger_path))
         else:
             try:
                 with open(ledger_path, encoding="utf-8") as f:
                     led9 = json.load(f)
-                decisions = led9.get("decisions", [])
-                first_red = [d for d in decisions
-                             if isinstance(d, str) and "首跑红" in d]
-                if first_red:
-                    results.append(("G9", True, "台账 decisions 有首跑红记录（%d 条）" % len(first_red)))
+                decisions = [d for d in led9.get("decisions", []) if isinstance(d, str)]
+
+                # 虎1：首跑红必须格式合规（正则），子串匹配不算
+                first_red_ok = [d for d in decisions if FIRST_RED_RE.search(d)]
+                first_red_fake = [d for d in decisions
+                                  if "首跑红" in d and not FIRST_RED_RE.search(d)]
+
+                # 虎3：verified 声明必须附测试证据（PASS n 且 FAIL 0）
+                bad_verified = [d for d in decisions
+                                if VERIFIED_EVIDENCE_RE.search(d)
+                                and not PASS_FAIL_OK_RE.search(d)]
+
+                problems = []
+                if not first_red_ok:
+                    if first_red_fake:
+                        problems.append(
+                            "有「首跑红」字样但格式不合规（缺具体日期/FAIL n/测试标识）：%s" %
+                            first_red_fake[0][:60])
+                    problems.append(
+                        "写了二级测试命令，但台账 decisions 没有格式合规的「首跑红 YYYY-MM-DD｜FAIL n｜<测试标识>」记录。"
+                        "总则 4.8：任何涉及逻辑的业务代码修改，必须先写测试、跑红留证才许写业务代码。缺此记录，封版判红。")
+                if bad_verified:
+                    problems.append(
+                        "decisions 里有声明 verified 但未附测试输出证据（须 PASS n 且 FAIL 0）的记录：%s" %
+                        bad_verified[0][:60])
+
+                if problems:
+                    results.append(("G9", False, "；".join(problems)))
                 else:
-                    results.append(("G9", False,
-                        "写了二级测试命令（非豁免），但台账 decisions 里没有「首跑红」记录。"
-                        "总则 4.8：任何涉及逻辑的业务代码修改，必须先写测试、跑红（FAIL n 且退出码非 0）、"
-                        "留证于 decisions，才许写业务代码。缺这条记录，封版判红。" ))
+                    results.append(("G9", True,
+                        "首跑红记录格式合规（%d 条），verified 声明均附测试证据" % len(first_red_ok)))
             except json.JSONDecodeError as e:
                 results.append(("G9", False, "台账 JSON 解析失败：%s" % e))
     else:
-        # 豁免/历史卡，或根本没写二级测试命令（G6 已判红），G9 不重复卡
-        results.append(("G9", True, "豁免/历史卡，或未写二级测试命令，不强制首跑红"))
+        # 没写二级测试命令（G6 已判红，或已豁免），G9 不重复卡
+        results.append(("G9", True, "未写二级测试命令，不强制首跑红"))
 
     # 输出
     card_id = status.group(1) if status else os.path.basename(card)
@@ -422,11 +543,35 @@ def main():
     verdict = "通过" if passed == len(results) else "不通过"
     print("结论：%s（%d/%d）" % (verdict, passed, len(results)))
 
-    # 封版归档：全绿且带 --seal 时，写归档摘要（只读基准）
+    # 封版归档：全绿且带 --seal 时，实际执行二级测试拿真实数字，写归档摘要 + 同步索引
     if verdict == "通过" and seal_ver is not None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        ap = seal_archive(card_id, seal_ver, base_dir)
+        # 1) 真实执行二级测试命令（hit8 已在 G6 解析过），回填 PASS/FAIL 数字
+        test_summary = None
+        if hit8:
+            rc, out = run_secondary_test(hit8, base)
+            pn, fn = parse_pass_fail(out)
+            if pn is not None or fn is not None:
+                test_summary = "`%s` → 退出码 %s，PASS %s / FAIL %s（%s）" % (
+                    hit8[:48], rc if rc is not None else "?",
+                    pn if pn is not None else 0,
+                    fn if fn is not None else 0,
+                    _dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
+            else:
+                test_summary = "`%s` → 退出码 %s（输出未见 PASS/FAIL 数字，见回执）" % (
+                    hit8[:48], rc if rc is not None else "?")
+        # 2) 回填验收口径（第 9 段真实行）
+        acc_rows = table_rows(sec.get(9, (0, []))[1])
+        ap = seal_archive(card_id, seal_ver, base_dir, test_summary=test_summary,
+                          acc_rows=acc_rows)
         print("归档：已生成 %s" % ap)
+        # 3) 同步索引（状态→已封版 vX，基线日期→今天）
+        index_path = os.path.join(base_dir, "索引.md")
+        ip = update_index(card_id, seal_ver, index_path)
+        if ip:
+            print("索引：已更新 %s 的封版状态" % card_id)
+        else:
+            print("索引：未找到 %s 对应行（或索引.md 不存在），跳过" % card_id)
 
     return 0 if verdict == "通过" else 1
 
