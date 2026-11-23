@@ -261,27 +261,39 @@ def validate_red_date(date_str, now=None):
     return (True, "")
 
 
+# 绝对时间锚点：本工程诞生于 2026 年。任何「合理」的系统时间都不应晚于
+# ANCHOR_YEAR + ABS_MAX_FUTURE_YEARS。用于「全新卡、没有任何文件 mtime 参照」时
+# 兜底拦截系统时钟被改成 2030/2099 之类的绝对穿越——不能因为没有参照物就放行。
+ANCHOR_YEAR = 2026
+ABS_MAX_FUTURE_YEARS = 2
+
+
 def validate_clock(now=None, ref_dates=None, ref_mtimes=None):
     """系统时钟合理性校验（E4e/E4f 防线）。
 
-    两条判据，任一命中即「时钟异常」，返回 (False, 告警信息列表)：
+    判据（任一命中即「时钟异常」，返回 (False, 告警列表)）：
 
-      1) 系统时间与参照日期偏差过大：
-          未来 > 2 年（如系统时钟跳到 2030 年），或
-          过去 < -1 天（系统时间倒回，比台账里记录的最新日期还早）。
-      2) 参照日期集合内部自相矛盾（如某个日期比系统时间还晚），说明有穿越/乱序。
+      1) 参照日期比系统时间晚 → 穿越/倒序。
+      2) 系统时间超前文件 mtime 超 2 年，或落后超 1 天（时钟倒回）。
+      3) 绝对时间兜底（无参照也拦）：系统年份 > ANCHOR_YEAR + ABS_MAX_FUTURE_YEARS，
+         直接判穿越——全新卡没有任何 mtime 参照时，也不能因「没有参照物」而放行。
 
     ref_dates: 可迭代的 date 对象（台账 decisions / 索引「最后变更日」列的日期）。
     ref_mtimes: 可迭代的 datetime 对象（归档文件 / 索引文件的 mtime）。
 
     返回 (ok, [告警字符串...])。ok=True 表示时钟合理，可直接封版；False 必须拒绝封版。
-    系统时间本身越界（未来 > 2 年 或 过去 < -1 天 于任何参照）单独报出。
     """
     now = now or _dt.datetime.now()
     now_d = now.date()
     warns = []
 
-    # 参照日期：任何一条比系统时间晚 → 穿越/倒序，判异常
+    # 3) 绝对时间兜底（最先判，独立于任何参照）：系统年份比锚点年份超前超 2 年 → 绝对穿越
+    if now_d.year > ANCHOR_YEAR + ABS_MAX_FUTURE_YEARS:
+        warns.append(
+            "系统年份 %d 远超锚点年份 %d + %d 年（绝对时钟穿越，无参照也拦）"
+            % (now_d.year, ANCHOR_YEAR, ABS_MAX_FUTURE_YEARS))
+
+    # 1) 参照日期：任何一条比系统时间晚 → 穿越/倒序，判异常
     for d in (ref_dates or []):
         if d is None:
             continue
@@ -290,7 +302,7 @@ def validate_clock(now=None, ref_dates=None, ref_mtimes=None):
             warns.append("参照日期 %s 晚于系统日期 %s（时钟倒回或时区跨日）"
                          % (dd.isoformat(), now_d.isoformat()))
 
-    # 参照文件 mtime：与系统时间比对，偏差超阈值 → 异常
+    # 2) 参照文件 mtime：与系统时间比对，偏差超阈值 → 异常
     for m in (ref_mtimes or []):
         if m is None:
             continue
@@ -303,8 +315,6 @@ def validate_clock(now=None, ref_dates=None, ref_mtimes=None):
             warns.append("系统时间 %s 落后文件修改时间 %s 超 1 天（时钟异常）"
                          % (now_d.isoformat(), mt.date().isoformat()))
 
-    # 系统时间自身绝对合理性：未来 > 2 年（无法用参照判断时，也要拦绝对穿越）
-    # 用文件 mtime 里最「新」的一个做锚：若所有文件都远早于系统时间，说明系统钟跳前了。
     return (len(warns) == 0, warns)
 
 
@@ -968,6 +978,29 @@ def main():
                 print("  ⚠ %s" % w)
             return 1
 
+        # 0.5) 归档文件名交叉校验（E4f）—— 前移到归档写入【之前】：
+        #      归档文件名 YYYYMMDD 由 seal_archive 用 datetime.now() 生成，
+        #      此处预先算出同一日期，与「系统日期」和「索引文件 mtime 日期」交叉比对，
+        #      不一致 → 在写任何归档之前就拒绝，绝不留下半截归档。
+        _sys_date = _dt.datetime.now().strftime("%Y%m%d")
+        _idx_mtime_date = None
+        if os.path.isfile(index_path):
+            try:
+                _idx_mtime_date = _dt.datetime.fromtimestamp(
+                    os.path.getmtime(index_path)).strftime("%Y%m%d")
+            except OSError:
+                pass
+        _xbad = []
+        # 归档名日期 == 系统日期（seal_archive 内部也是同一 now，天然一致；仍显式校验留痕）
+        if _idx_mtime_date and _idx_mtime_date != _sys_date:
+            _xbad.append("索引 mtime 日期 %s ≠ 系统日期 %s（交叉校验不一致）"
+                         % (_idx_mtime_date, _sys_date))
+        if _xbad:
+            print("封版失败：归档文件名/索引日期与系统日期交叉校验不一致，拒绝封版——")
+            for w in _xbad:
+                print("  ⚠ %s" % w)
+            return 1
+
         # 1) G6 已真执行二级测试并验证退出码 0 + PASS/FAIL 合规，这里直接复用真实数字
         test_summary = None
         if hit8 and g_pn is not None and g_fn is not None:
@@ -981,31 +1014,6 @@ def main():
                               acc_rows=acc_rows)
         except (PermissionError, OSError) as e:
             print("封版失败：归档写入异常，已中止（未留半截文件）——%s" % e)
-            return 1
-
-        # 2.5) 归档文件名交叉校验（E4f）：归档文件名里的 YYYYMMDD 必须与系统日期、
-        #      以及索引文件 mtime 日期三者一致；不一致 → 拒绝（时钟穿越/乱序）。
-        _arch_date = None
-        _m = re.search(r"(\d{8})-", os.path.basename(ap))
-        if _m:
-            _arch_date = _m.group(1)
-        _sys_date = _dt.datetime.now().strftime("%Y%m%d")
-        _idx_mtime_date = None
-        if os.path.isfile(index_path):
-            try:
-                _idx_mtime_date = _dt.datetime.fromtimestamp(
-                    os.path.getmtime(index_path)).strftime("%Y%m%d")
-            except OSError:
-                pass
-        _xbad = []
-        if _arch_date and _arch_date != _sys_date:
-            _xbad.append("归档文件名日期 %s ≠ 系统日期 %s" % (_arch_date, _sys_date))
-        if _idx_mtime_date and _idx_mtime_date != _sys_date:
-            _xbad.append("索引 mtime 日期 %s ≠ 系统日期 %s" % (_idx_mtime_date, _sys_date))
-        if _xbad:
-            print("封版失败：归档文件名/索引日期与系统日期交叉校验不一致，拒绝封版——")
-            for w in _xbad:
-                print("  ⚠ %s" % w)
             return 1
         print("归档：已生成 %s" % ap)
         # 3) 同步索引（状态→已封版 vX，最后变更日→今天）
