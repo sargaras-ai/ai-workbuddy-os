@@ -261,10 +261,13 @@ def validate_red_date(date_str, now=None):
     return (True, "")
 
 
-# 绝对时间锚点：本工程诞生于 2026 年。任何「合理」的系统时间都不应晚于
-# ANCHOR_YEAR + ABS_MAX_FUTURE_YEARS。用于「全新卡、没有任何文件 mtime 参照」时
-# 兜底拦截系统时钟被改成 2030/2099 之类的绝对穿越——不能因为没有参照物就放行。
+# 绝对时间锚点：本工程诞生于 2026 年。任何「合理」的系统时间都应落在
+# [ANCHOR_YEAR_LOWER, ANCHOR_YEAR + ABS_MAX_FUTURE_YEARS] 区间内。
+#   - 上界：系统年份 > 2028 → 绝对穿越（防 2030/2099）
+#   - 下界：系统年份 < 2025 → 时光倒流（防 2010）
+# 用于「全新卡、没有任何文件 mtime 参照」时兜底——不能因为没有参照物就放行。
 ANCHOR_YEAR = 2026
+ANCHOR_YEAR_LOWER = 2025
 ABS_MAX_FUTURE_YEARS = 2
 
 
@@ -287,11 +290,17 @@ def validate_clock(now=None, ref_dates=None, ref_mtimes=None):
     now_d = now.date()
     warns = []
 
-    # 3) 绝对时间兜底（最先判，独立于任何参照）：系统年份比锚点年份超前超 2 年 → 绝对穿越
+    # 3) 绝对时间兜底（最先判，独立于任何参照）：
+    #    上界：系统年份比锚点年份超前超 2 年 → 绝对穿越（防 2030/2099）
+    #    下界：系统年份早于下界年份 → 时光倒流（防 2010）
     if now_d.year > ANCHOR_YEAR + ABS_MAX_FUTURE_YEARS:
         warns.append(
             "系统年份 %d 远超锚点年份 %d + %d 年（绝对时钟穿越，无参照也拦）"
             % (now_d.year, ANCHOR_YEAR, ABS_MAX_FUTURE_YEARS))
+    if now_d.year < ANCHOR_YEAR_LOWER:
+        warns.append(
+            "系统年份 %d 早于下界年份 %d（时光倒流，无参照也拦）"
+            % (now_d.year, ANCHOR_YEAR_LOWER))
 
     # 1) 参照日期：任何一条比系统时间晚 → 穿越/倒序，判异常
     for d in (ref_dates or []):
@@ -321,6 +330,22 @@ def validate_clock(now=None, ref_dates=None, ref_mtimes=None):
 def clock_anomaly_ok(now=None, ref_dates=None, ref_mtimes=None):
     """封版前的时钟闸门：返回 (ok, 告警列表)。ok=False 必须拒绝封版。"""
     return validate_clock(now=now, ref_dates=ref_dates, ref_mtimes=ref_mtimes)
+
+
+def dates_within_tolerance(a_str, b_str, tol_days=1):
+    """日期容差比对：两个 YYYYMMDD 字符串相差 ≤ tol_days 天 → True（同源容差判定）。
+
+    与 E4e 的「容差」同源：跨日封版（昨天封 v1、今天封 v2）是正常操作，
+    不能因为「索引 mtime 日期 == 昨天」就误杀。返回 (ok, 相差天数)。
+    任一方无法解析返回 (False, None)。
+    """
+    try:
+        da = _dt.datetime.strptime(a_str, "%Y%m%d").date()
+        db = _dt.datetime.strptime(b_str, "%Y%m%d").date()
+    except (ValueError, TypeError):
+        return (False, None)
+    diff = abs((da - db).days)
+    return (diff <= tol_days, diff)
 
 
 def seal_archive(card_id, version, base_dir, test_summary=None, acc_rows=None):
@@ -978,11 +1003,13 @@ def main():
                 print("  ⚠ %s" % w)
             return 1
 
-        # 0.5) 归档文件名交叉校验（E4f）—— 前移到归档写入【之前】：
-        #      归档文件名 YYYYMMDD 由 seal_archive 用 datetime.now() 生成，
-        #      此处预先算出同一日期，与「系统日期」和「索引文件 mtime 日期」交叉比对，
-        #      不一致 → 在写任何归档之前就拒绝，绝不留下半截归档。
+        # 0.5) 归档文件名三方交叉校验（E4f）—— 前移到归档写入【之前】：
+        #      归档名日期 YYYYMMDD、系统日期、索引 mtime 日期，三方用「容差判定」交叉比对：
+        #      允许 ±1 天（跨日封版：昨天封 v1、今天封 v2 是正常操作，不能误杀）。
+        #      不一致 → 在写任何归档之前就 return 1，绝不留下半截归档。
         _sys_date = _dt.datetime.now().strftime("%Y%m%d")
+        # 归档名日期与 seal_archive 内部同源（都是 datetime.now()），此处预取同一日期
+        _arch_date = _sys_date
         _idx_mtime_date = None
         if os.path.isfile(index_path):
             try:
@@ -991,12 +1018,19 @@ def main():
             except OSError:
                 pass
         _xbad = []
-        # 归档名日期 == 系统日期（seal_archive 内部也是同一 now，天然一致；仍显式校验留痕）
-        if _idx_mtime_date and _idx_mtime_date != _sys_date:
-            _xbad.append("索引 mtime 日期 %s ≠ 系统日期 %s（交叉校验不一致）"
-                         % (_idx_mtime_date, _sys_date))
+        # 三方交叉：归档名日期 ↔ 系统日期，归档名日期 ↔ 索引 mtime 日期，均须容差 ±1 天
+        _ok_arch_sys, _d_arch_sys = dates_within_tolerance(_arch_date, _sys_date, tol_days=1)
+        if not _ok_arch_sys:
+            _xbad.append("归档名日期 %s 与系统日期 %s 相差超容差（%s）" %
+                         (_arch_date, _sys_date, "无法解析" if _d_arch_sys is None else "%d 天" % _d_arch_sys))
+        if _idx_mtime_date is not None:
+            _ok_arch_idx, _d_arch_idx = dates_within_tolerance(_arch_date, _idx_mtime_date, tol_days=1)
+            if not _ok_arch_idx:
+                _xbad.append("归档名日期 %s 与索引 mtime 日期 %s 相差超容差（%s）" %
+                             (_arch_date, _idx_mtime_date,
+                              "无法解析" if _d_arch_idx is None else "%d 天" % _d_arch_idx))
         if _xbad:
-            print("封版失败：归档文件名/索引日期与系统日期交叉校验不一致，拒绝封版——")
+            print("封版失败：归档名/系统日期/索引 mtime 三方交叉校验不一致，拒绝封版——")
             for w in _xbad:
                 print("  ⚠ %s" % w)
             return 1
