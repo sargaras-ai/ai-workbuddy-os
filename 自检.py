@@ -2,7 +2,7 @@
 """规则自检（防腐剂）：查 总则.md / 暗语表.md 是否走样，副本是否被 cp 冲掉。
 
 用法（在包目录或 clone 下来的仓库里都能跑，脚本靠 __file__ 找自己）：
-    python 自检.py                 # 查本目录 + github_release/ 下的两个文件
+    python 自检.py                 # 查本目录 + github_release/ 下的全部文件
     python 自检.py <文件> [...]    # 负控用：只查指定文件
 
 退出码：0 全过 / 1 有不通过项
@@ -18,13 +18,14 @@
   4 只读禁令位置      回落到「触发条件」而非执行首条硬规则
   5 路由不一致        总则兜底序 ≠ 暗语表交集序（两份规则各说一套）
   6 副本被 cp 覆盖    正本与副本逐字节相同 —— 适配版被冲掉，最难自己发现的一种
-  7 副本盘符泄漏      副本里出现 C:\\ D:\\ 之类本机路径
+  7 副本隐私泄漏      全量递归扫 github_release/ 的所有文件（.md/.py/.json/.gitignore 等），抓盘符与真实项目名
   8 引用悬空          文档里点名的包内文件不存在（HND 模板那种空引用）
   9 心跳机制齐备      总则第七节 / 暗语表别名表 / 巡检.py 三者都在（重构后防漏）
 
 局限（明写）：只认字面，判不出语义；文案换了说法它看不懂，只能拦结构性问题。
 """
 import io
+import json
 import os
 import re
 import sys
@@ -100,13 +101,78 @@ def check_anyu(path, s, role, is_copy):
         ok("只读" not in trig and "硬规则" in act and "先解除只读" in act,
            "只读禁令在执行动作首条", "触发条件=%s" % trig.strip())
 
-    # 副本必须干净（正本本来就是本机路径，不查也不算项）
-    if is_copy:
-        hits = re.findall(r"[A-Za-z]:[\\/]", s)
-        ok(not hits, "副本无盘符路径",
-           "" if not hits else "%d 处，首处 %.30s" % (len(hits), hits[0]))
-
+    # 副本盘符/隐私检查已改为全量递归扫描（见 check_release_privacy），此处不再单查两份文件
     return order_tokens(order) if order else None
+
+
+# 7 全量递归隐私扫描（红队二次整改）：
+#    规则：递归扫发布目录下的所有文件——.md / .py / .json / .gitignore / 无扩展名文件，
+#          抓本机盘符路径与真实项目名，命中即判红。两种斜杠都认。
+#    敏感模式不写在本源码里：运行时从 _local/隐私模式.json 读取；该模式库已 .gitignore，
+#    禁止提交或发布。源码内不含任何真实标识、盘符字面量或字符串拼接遮挡。
+#    模式库缺失/不可读/格式坏 → 直接判红，绝不静默跳过（拒绝假绿灯）。
+#    唯一排除 _local/ 目录（模式库本身不是发布内容）；检查器自身源码不排除，
+#    因为源码里没有敏感字面量，扫自己也安全。
+LOCAL_PATTERN_REL = os.path.join("_local", "隐私模式.json")
+
+
+def _load_privacy_patterns():
+    """从脚本所在目录向上最多找 4 层 _local/隐私模式.json；缺失或坏格式抛异常。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(4):
+        cand = os.path.join(here, LOCAL_PATTERN_REL)
+        if os.path.isfile(cand):
+            obj = json.loads(io.open(cand, encoding="utf-8").read())
+            drive = re.compile(obj["盘符正则"])
+            # 整词模式：按单词边界匹配，避免 ATOMIC 这类普通英文单词里的裸词误报
+            whole = [re.compile(r"\b" + re.escape(str(x)) + r"\b", re.I)
+                     for x in obj["整词敏感词"] if str(x).strip()]
+            # 子串模式：按字面包含匹配（中文/批次号/路径片段本来就不是独立单词）
+            sub = [str(x) for x in obj["子串敏感词"] if str(x).strip()]
+            if not whole and not sub:
+                raise ValueError("敏感词列表为空")
+            return drive, whole, sub, cand
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    raise IOError("隐私模式库缺失：_local/隐私模式.json（拒绝静默跳过）")
+
+
+def check_release_privacy():
+    """递归扫发布目录所有文件；命中盘符或真实项目名即判红。返回命中数。"""
+    scan_root = REL if is_package_layout() else BASE
+    try:
+        drive, whole, sub, pattern_file = _load_privacy_patterns()
+    except Exception as e:
+        ok(False, "隐私模式库可加载", str(e))
+        return 1
+    ok(True, "隐私模式库可加载", os.path.relpath(pattern_file, BASE))
+
+    hits = []
+    scanned = 0
+    for root, dirs, files in os.walk(scan_root):
+        dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git", "_local")]
+        for fn in files:
+            fp = os.path.join(root, fn)
+            scanned += 1
+            try:
+                txt = io.open(fp, encoding="utf-8", errors="replace").read().replace("\r\n", "\n")
+            except Exception:
+                continue
+            rel = os.path.relpath(fp, scan_root)
+            for i, ln in enumerate(txt.splitlines(), 1):
+                if drive.search(ln):
+                    hits.append("%s:%d 盘符" % (rel, i))
+                for rx in whole:
+                    if rx.search(ln):
+                        hits.append("%s:%d 整词敏感词(%s)" % (rel, i, rx.pattern))
+                for nm in sub:
+                    if nm in ln:
+                        hits.append("%s:%d 敏感词(%s)" % (rel, i, nm))
+    ok(not hits, "发布目录隐私全量扫描（%d 文件，%d 模式）" % (scanned, len(whole) + len(sub)),
+       "" if not hits else "%d 处：%s" % (len(hits), "；".join(hits[:6])))
+    return len(hits)
 
 
 def check_zongze(s, role, anyu_order, is_copy):
@@ -123,10 +189,7 @@ def check_zongze(s, role, anyu_order, is_copy):
     ok(not re.findall(r"G1[–-]G6", s), "无 G1–G6 旧口径")
     ok(not re.findall(r"G2/G4(?![/]G6)", s), "无 G2/G4 旧口径")
     ok("G7" in s, "含 G7（封版映射已机器化）")
-    if is_copy:
-        hits = re.findall(r"[A-Za-z]:[\\/]", s)
-        ok(not hits, "副本无盘符路径",
-           "" if not hits else "%d 处，首处 %.30s" % (len(hits), hits[0]))
+    # 副本盘符/隐私检查已改为全量递归扫描（见 check_release_privacy），此处不再单查两份文件
 
 
 # 9 心跳机制齐备（重构后防漏）：三样必须都在 —— 总则第七节 / 暗语表别名表 / 巡检.py
@@ -335,6 +398,9 @@ else:
                 t_main, t_copy = _titles(twin), _titles(copy_p)
                 ok(t_main == t_copy, "副本 %s 章节骨架与正本一致" % f,
                    "正本 %d 个标题 / 副本 %d 个（漂移）" % (len(t_main), len(t_copy)) if t_main != t_copy else "")
+
+    # 7 发布目录全量递归隐私扫描（红队终审）：只跑一次，覆盖所有 .md/.py
+    check_release_privacy()
 
 print("\n" + "=" * 66)
 print("共执行 %d 项检查" % CHECKS[0])

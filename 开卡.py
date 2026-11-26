@@ -3,9 +3,9 @@
 """开卡.py —— 「开卡 <短名> / 新项目 <短名>」的机械化开卡器（仅标准库，py3.6+ 可跑）
 
 用法：
-    python H:\\项目约束包\\开卡.py P-03-invoice
-    python H:\\项目约束包\\开卡.py P-03-invoice --dry-run
-    python H:\\项目约束包\\开卡.py --self-test          # 自检：全在临时目录，不碰真索引
+    python 开卡.py P-03-invoice
+    python 开卡.py P-03-invoice --dry-run
+    python 开卡.py --self-test          # 自检：全在临时目录，不碰真索引
 
 包目录与新项目根目录默认按脚本所在位置推导（可用环境变量覆盖，换机/换盘不必改源码）：
     WB_PACK  P-00-空白卡 / 索引 / card_gate 所在目录，默认 = 脚本所在目录
@@ -255,7 +255,7 @@ def open_card(card, root, base_dir, index_path, dry_run=False):
 
 
 def self_test():
-    """全程在临时目录跑，不碰 H:\\ 根与真索引。"""
+    """全程在临时目录跑，不碰真实根目录与真索引。"""
     tmp = tempfile.mkdtemp(prefix="kaika_selftest_")
     base = os.path.join(tmp, "包")
     os.makedirs(base)
@@ -263,7 +263,7 @@ def self_test():
     idx = os.path.join(base, "索引.md")
     with open(idx, "w", encoding="utf-8", newline="\n") as f:
         f.write("# 索引\n\n| 卡号 | 项目名 | 根路径 | 基线 | 状态 | 最后变更日 |\n"
-                "|---|---|---|---|---|---|\n| P-01-hede | 禾灯 | `H:\\P01-hede\\` | v1.0 | 在建 | 2026-11-15 |\n")
+                "|---|---|---|---|---|---|\n| P-01-demo | 示例项目 | `<工作区>/P-01-demo/` | v1.0 | 在建 | 2026-11-15 |\n")
 
     ok = True
 
